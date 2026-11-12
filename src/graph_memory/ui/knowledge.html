@@ -1,0 +1,594 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Knowledge Graph</title>
+<style>
+  :root {
+    --bg: #0a0d13; --panel: rgba(16, 20, 29, 0.88); --panel-solid: #121722;
+    --line: rgba(255, 255, 255, 0.08); --line-strong: rgba(255, 255, 255, 0.16);
+    --text: #e6e9f0; --muted: #8b93a7; --faint: #5b6377; --accent: #ffe066;
+    --bad: #ff453a; --warn: #ff9f0a; --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 13px/1.45 system-ui, -apple-system, "Segoe UI", Inter, sans-serif; overflow: hidden; }
+  #graph { position: fixed; inset: 0; }
+  button, input { font: inherit; color: inherit; }
+  .panel { position: fixed; background: var(--panel); border: 1px solid var(--line);
+    border-radius: 14px; backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    box-shadow: 0 12px 40px rgba(0,0,0,.35); }
+  #top { top: 14px; left: 14px; right: 14px; min-height: 52px; display: flex; align-items: center;
+    gap: 12px 16px; padding: 8px 14px; flex-wrap: wrap; }
+  #top h1 { font-size: 14px; font-weight: 650; margin: 0; white-space: nowrap; }
+  #top h1 span { color: var(--accent); }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; }
+  .chip { padding: 3px 9px; border-radius: 999px; background: rgba(255,255,255,.05);
+    border: 1px solid var(--line); color: var(--muted); white-space: nowrap; font-size: 12px; }
+  .chip b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+  .spacer { flex: 1; }
+  .btn { background: rgba(255,255,255,.06); border: 1px solid var(--line-strong); border-radius: 8px;
+    padding: 5px 11px; cursor: pointer; white-space: nowrap; text-decoration: none; }
+  .btn:hover { background: rgba(255,255,255,.12); }
+  label.tg { display: flex; align-items: center; gap: 5px; color: var(--muted); font-size: 12px; cursor: pointer; }
+  label.tg input { margin: 0; accent-color: var(--accent); }
+  #search { width: 220px; background: rgba(0,0,0,.25); border: 1px solid var(--line-strong);
+    border-radius: 8px; padding: 5px 10px; outline: none; }
+  #search:focus { border-color: var(--accent); }
+  :root { --top: 80px; }
+  .filters { display: flex; gap: 6px 12px; flex-wrap: wrap; align-items: center; }
+  .fgrp { display: flex; gap: 4px; align-items: center; }
+  .fgrp > span { color: var(--faint); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; margin-right: 2px; }
+  .fchip { padding: 3px 9px; border-radius: 999px; background: rgba(255,255,255,.04);
+    border: 1px solid var(--line-strong); color: var(--muted); font-size: 12px; cursor: pointer; }
+  .fchip b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; margin-left: 3px; }
+  .fchip:hover { background: rgba(255,255,255,.1); }
+  .fchip[aria-pressed="true"] { background: rgba(255,224,102,.16); border-color: var(--accent); color: var(--text); }
+  .fchip.gone[aria-pressed="true"] { background: rgba(255,69,58,.18); border-color: var(--bad); }
+  .fchip.review[aria-pressed="true"] { background: rgba(255,159,10,.18); border-color: var(--warn); }
+  select.scope { background: rgba(0,0,0,.25); border: 1px solid var(--line-strong); border-radius: 8px;
+    padding: 4px 8px; color: var(--text); font: inherit; font-size: 12px; max-width: 200px; }
+  .linkbtn { background: none; border: 0; color: var(--muted); cursor: pointer; font-size: 12px; text-decoration: underline; padding: 0; }
+  .pair { padding: 8px 14px; border-bottom: 1px solid rgba(255,255,255,.04); }
+  .pair .arrow { color: var(--faint); font-size: 11px; margin: 3px 0; }
+  .act { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .act input { flex: 1; min-width: 160px; background: rgba(0,0,0,.25); border: 1px solid var(--line-strong);
+    border-radius: 8px; padding: 5px 9px; outline: none; }
+  .btn.danger { border-color: rgba(255,69,58,.6); }
+  .btn.danger:hover { background: rgba(255,69,58,.18); }
+  .note { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  #side { top: var(--top); left: 14px; bottom: 14px; width: 320px; overflow: auto; }
+  .grp h2 { position: sticky; top: 0; margin: 0; padding: 10px 14px 6px; background: var(--panel-solid);
+    font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--muted); display: flex; gap: 6px; align-items: center; }
+  .grp h2 i { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+  .it { padding: 7px 14px; cursor: pointer; border-bottom: 1px solid rgba(255,255,255,.03); }
+  .it:hover { background: rgba(255,255,255,.05); }
+  .it.sel { background: rgba(255,224,102,.08); box-shadow: inset 2px 0 var(--accent); }
+  .it.gone { opacity: .45; text-decoration: line-through; }
+  .it small { color: var(--faint); font-size: 11px; display: block; }
+  .empty { color: var(--faint); padding: 14px; font-size: 12.5px; }
+  #detail { top: var(--top); right: 14px; bottom: 14px; width: 420px; overflow: auto;
+    transform: translateX(460px); transition: transform .22s ease; }
+  #detail.open { transform: none; }
+  .dh { position: sticky; top: 0; background: var(--panel-solid); padding: 14px 16px 12px;
+    border-bottom: 1px solid var(--line); border-radius: 14px 14px 0 0; }
+  .dh .kind { font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+  .dh .id { font-family: var(--mono); color: var(--muted); font-size: 11.5px; }
+  .dh .close { position: absolute; top: 10px; right: 10px; background: none; border: 0;
+    color: var(--muted); font-size: 18px; cursor: pointer; }
+  .dh p { margin: 8px 0 0; font-size: 14px; }
+  .ds { padding: 12px 16px; border-bottom: 1px solid var(--line); }
+  .ds h3 { margin: 0 0 6px; font-size: 11px; font-weight: 600; letter-spacing: .08em;
+    text-transform: uppercase; color: var(--muted); }
+  .ds p { margin: 0; }
+  .kv { display: grid; grid-template-columns: 96px 1fr; gap: 3px 10px; font-size: 12.5px; margin: 0; }
+  .kv dt { color: var(--muted); } .kv dd { margin: 0; overflow-wrap: anywhere; }
+  .nav { display: block; padding: 6px 8px; margin: 2px -8px; border-radius: 6px; cursor: pointer; }
+  .nav:hover { background: rgba(255,255,255,.06); }
+  .nav small { color: var(--faint); display: block; font-size: 11px; }
+  .stale { border-left: 3px solid var(--bad); }
+  .warn { border-left: 3px solid var(--warn); }
+  .it .tag { color: var(--warn); }
+  .it input.pick { margin: 0 8px 0 0; accent-color: var(--accent); vertical-align: -1px; }
+  .sidebar-head { position: sticky; top: 0; z-index: 2; display: flex; gap: 8px; align-items: center;
+    padding: 8px 14px; background: var(--panel-solid); border-bottom: 1px solid var(--line); }
+  .sidebar-head span { color: var(--muted); font-size: 12px; flex: 1; }
+  .pickbar { position: sticky; bottom: 0; z-index: 2; background: var(--panel-solid); padding: 10px 14px;
+    border-top: 1px solid var(--line-strong); display: flex; flex-direction: column; gap: 8px; }
+  #toast { position: fixed; left: 50%; bottom: 24px; transform: translate(-50%, 140%); padding: 9px 14px;
+    display: flex; gap: 12px; align-items: center; transition: transform .2s ease; z-index: 5; }
+  #toast.show { transform: translate(-50%, 0); }
+  @media (prefers-reduced-motion: reduce) { #detail, #toast { transition: none; } }
+  .pill { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 5px;
+    background: rgba(255,255,255,.07); color: var(--muted); margin: 0 4px 4px 0; cursor: pointer; }
+  .pill:hover { color: var(--text); }
+  .q { border-left: 2px solid #7aa2ff; padding-left: 9px; color: #c8d4ff; margin-bottom: 4px; }
+  #legend { left: 350px; bottom: 14px; padding: 10px 14px; display: flex; flex-wrap: wrap;
+    gap: 4px 14px; font-size: 11.5px; color: var(--muted); max-width: calc(100% - 800px); }
+  #legend i { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; }
+  #legend i.ln { width: 16px; height: 3px; border-radius: 2px; vertical-align: 2px; }
+  #loading { position: fixed; inset: 0; display: grid; place-items: center; color: var(--muted);
+    pointer-events: none; text-align: center; padding: 0 20px; }
+  .tip { background: var(--panel-solid); border: 1px solid var(--line-strong); border-radius: 8px;
+    padding: 6px 9px; max-width: 340px; color: var(--text); font: 12px/1.4 system-ui, sans-serif; }
+  .tip small { color: var(--muted); display: block; font-size: 10.5px; text-transform: uppercase; }
+  @media (max-width: 900px) {
+    #side { width: auto; right: 14px; bottom: auto; max-height: 34vh; }
+    #detail { width: auto; left: 14px; top: auto; height: 55vh; transform: translateY(110%); }
+    #legend { display: none; }
+  }
+</style>
+</head>
+<body>
+<div id="graph"></div>
+<div id="loading">Loading knowledge…</div>
+<header id="top" class="panel">
+  <h1>Knowledge <span>Graph</span></h1>
+  <div class="chips" id="chips"></div>
+  <div class="spacer"></div>
+  <div class="filters" id="filters" role="group" aria-label="Filters"></div>
+  <label class="tg"><input type="checkbox" id="showEnt" checked> entities</label>
+  <input id="search" placeholder="Search   ( / )" autocomplete="off">
+  <a class="btn" href="/help">Memory help</a>
+  <a class="btn" href="/">← Sessions</a>
+</header>
+<aside id="side" class="panel"></aside>
+<section id="detail" class="panel" aria-live="polite"></section>
+<footer id="legend" class="panel"></footer>
+<div id="toast" class="panel" role="status"></div>
+
+<script src="/vendor/3d-force-graph.min.js"></script>
+<script src="/kview.js"></script>
+<script src="/idle.js"></script>
+<script>
+"use strict";
+const TOKEN = "__GM_TOKEN__";
+const TYPE = { decision: "#ffd60a", fact: "#64d2ff", preference: "#ff6b9a", pitfall: "#ff9f0a",
+  procedure: "#3ddc97", open: "#b48cff", learned: "#5e7bff" };
+const TYPE_NAME = { decision: "Decisions", fact: "Facts", preference: "Preferences",
+  pitfall: "Pitfalls", procedure: "Procedures", open: "Open items", learned: "Learned" };
+const ORIGIN = { user: "the user said it", docs: "read in documentation", code: "read in source code",
+  observed: "seen in tool output, a test run or the running system",
+  assistant: "the assistant's own explanation, not checked against a source",
+  "": "not recorded (learned before sources were kept)" };
+const VOLATILITY = { stable: "stable: changes only when someone changes it",
+  versioned: "with new versions: due for review 180 days after it was last confirmed",
+  volatile: "within months: due for review after 30 days, and no longer recalled once due" };
+const REL = { supersedes: "#ff453a", depends_on: "#7aa2ff", causes: "#ff9f0a", refines: "#3ddc97",
+  alternative: "#bf5af2", same_area: "#aab6cd", co_occurs: "#5b6377", co_used: "#ffe066",
+  about: "#3a4252" };
+const ENTITY = "#c9ced8";
+const GREY = "#7d8496";
+const FKEY = "gm.knowledge.filters";
+function loadFilters() {
+  try { return KView.clean(JSON.parse(localStorage.getItem(FKEY) || "null")); } catch (e) { return KView.defaults(); }
+}
+function saveFilters() { try { localStorage.setItem(FKEY, JSON.stringify(S.f)); } catch (e) { /* private window */ } }
+const S = { data: null, showEnt: true, f: loadFilters(), v: null, on: null, litEnt: new Set(), match: null, selected: null, fitted: false,
+  picking: false, picked: new Set(), deleted: [] };
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const day = (iso) => (iso ? iso.slice(0, 10) : "");
+const when = (iso) => (iso ? new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "");
+const TRIGGER = { compact: "graduated at a compaction", session_end: "graduated when the session ended",
+  idle: "graduated after 20 quiet minutes", sweep: "graduated when the daemon started",
+  abandoned: "graduated when the session was abandoned", manual: "graduated by hand", backfill: "graduated by hand",
+  rebuild: "graduated again from the session's transcript" };
+const sessionName = (key) => "session " + String(key || "").split(":").pop().slice(0, 8);
+function rgba(hex, a) {
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+}
+async function api(path, body) {
+  const opts = { headers: { "X-GM-Token": TOKEN } };
+  if (body !== undefined) {
+    opts.method = "POST"; opts.body = JSON.stringify(body);
+    opts.headers["Content-Type"] = "application/json";
+  }
+  const r = await fetch(path, opts);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || r.statusText);
+  return data;
+}
+
+const G = ForceGraph3D({ controlType: "orbit" })($("graph"))
+  .backgroundColor("#0a0d13").showNavInfo(false).nodeId("id")
+  .nodeRelSize(3).nodeOpacity(0.95).nodeResolution(14)
+  .nodeVal((n) => (n.kind === "entity" ? 0.6 + Math.min(n.mentions, 8) * 0.25 : 1.4 + Math.min(n.strength, 6) * 0.6))
+  .nodeColor(nodeColor)
+  .nodeLabel((n) => `<div class="tip"><small>${n.kind === "entity" ? esc(n.ekind) : esc(n.type)}</small>${esc(n.label)}</div>`)
+  .linkColor(linkColor)
+  .linkWidth((l) => (l.relation === "about" ? 0.2 : 0.4 + l.weight * 2.2))
+  .linkOpacity(0.85)
+  .linkCurvature((l) => (l.relation === "supersedes" ? 0.25 : 0))
+  .linkDirectionalArrowLength((l) => (l.relation === "supersedes" || l.relation === "depends_on" || l.relation === "causes" ? 3 : 0))
+  .linkDirectionalArrowRelPos(1)
+  .linkLabel((l) => `<div class="tip"><small>${esc(l.relation)}${l.relation === "about" ? "" : " · " + l.weight}</small>${esc(l.reason || "")}</div>`)
+  .onNodeClick((n) => select(n.id, true))
+  .onBackgroundClick(() => clear())
+  .cooldownTicks(200)
+  .onEngineStop(() => { if (!S.fitted) { S.fitted = true; G.zoomToFit(700, 90); } });
+GraphIdle.quietWhenStill(G);  // stop drawing while nothing moves: an open page stays cool
+G.d3Force("link")
+  .distance((l) => (l.relation === "about" ? 26 : 40 - l.weight * 20))
+  .strength((l) => (l.relation === "about" ? 0.25 : 0.2 + l.weight * 0.6));
+G.d3Force("charge").strength(-40);
+
+// highlighted: what the filters and the search both leave in (null: everything)
+function refreshShown() {
+  const lit = S.v && S.v.lit;
+  S.on = !S.match ? lit : !lit ? S.match : new Set([...lit].filter((x) => S.match.has(x)));
+}
+function nodeColor(n) {
+  if (S.selected && n.id === S.selected) return "#ffffff";
+  const on = S.on;
+  if (n.kind === "entity") {
+    const lit = (!S.v.lit || S.litEnt.has(n.id)) && (!S.match || S.match.has(n.id));
+    return rgba(ENTITY, lit ? 0.75 : 0.06);
+  }
+  const lk = KView.look(n.item, on);
+  return rgba(lk.gone ? "#ff453a" : lk.grey ? GREY : TYPE[n.type] || "#888", lk.alpha);
+}
+function linkColor(l) {
+  const c = REL[l.relation] || "#888";
+  const s = typeof l.source === "object" ? l.source.id : l.source;
+  const t = typeof l.target === "object" ? l.target.id : l.target;
+  if (S.selected && (s === S.selected || t === S.selected)) return rgba(c, 1);
+  const on = S.on;
+  if (on && !(on.has(s) && (on.has(t) || l.relation === "about"))) return rgba(c, 0.04);
+  return rgba(c, l.relation === "about" ? 0.35 : 0.75);
+}
+
+function graphData() {
+  const d = S.data;
+  S.v = KView.view(d, S.f);
+  S.litEnt = KView.litEntities(d.items, S.v.lit);
+  refreshShown();
+  const items = S.v.items;
+  const keep = new Set(items.map((i) => i.id));
+  const nodes = items.map((i) => ({ id: i.id, kind: "item", type: i.type, label: i.statement,
+    valid: i.valid, strength: i.strength, area: i.area, item: i }));
+  const links = d.edges.filter((e) => keep.has(e.source) && keep.has(e.target)).map((e) => ({ ...e }));
+  if (S.showEnt) {
+    const used = new Set();
+    for (const i of items) for (const e of i.entities) { used.add(e); links.push({ source: i.id, target: e, relation: "about", weight: 1 }); }
+    for (const e of d.entities) if (used.has(e.id)) nodes.push({ id: e.id, kind: "entity", ekind: e.kind, label: e.name, mentions: e.mentions });
+  }
+  return { nodes, links };
+}
+
+function renderChips() {
+  const st = S.data.stats;
+  $("chips").innerHTML = [["entities", st.entities], ["edges", st.edges], ["segments", st.segments]]
+    .map(([k, v]) => `<span class="chip"><b>${v}</b> ${k}</span>`).join("");
+}
+function renderFilters() {
+  const f = S.f, c = KView.counts(S.data, f);
+  const chip = (grp, val, label, extra = "") => `<button class="fchip ${extra}" data-f="${grp}" data-v="${val}"
+    aria-pressed="${f[grp].includes(val)}">${label}<b>${c[val]}</b></button>`;
+  const scopes = S.data.scopes || [];
+  if (f.scope !== "all" && !scopes.some((x) => x.key === f.scope)) f.scope = "all";
+  const isProject = f.scope !== "all" && f.scope !== "global";
+  $("filters").innerHTML = `
+    <div class="fgrp"><span>status</span>${chip("status", "current", "current")}${chip("status", "review", "needs review", "review")}${chip("status", "gone", "no longer true", "gone")}</div>
+    <div class="fgrp"><span>area</span>${chip("area", "survivor", "survivor")}${chip("area", "old", "old")}${chip("area", "dormant", "dormant")}</div>
+    <div class="fgrp"><span>scope</span><select class="scope" id="scope" aria-label="Scope">
+      <option value="all">all scopes</option>
+      ${scopeOptions(scopes.filter((x) => x.key === "global"), "", f)}
+      ${scopeOptions(scopes.filter((x) => x.key !== "global" && !x.topic), "projects", f)}
+      ${scopeOptions(scopes.filter((x) => x.topic), "topics", f)}
+    </select>${isProject ? `<label class="tg"><input type="checkbox" id="withGlobal" ${f.withGlobal ? "checked" : ""}> + global</label>` : ""}</div>
+    ${KView.active(f) ? `<button class="linkbtn" data-f="clear">clear</button>` : ""}`;
+  fitTop();
+}
+function applyFilters() {
+  saveFilters(); renderFilters();
+  G.graphData(graphData()); G.nodeColor(nodeColor).linkColor(linkColor); renderSide();
+}
+function fitTop() {
+  document.documentElement.style.setProperty("--top", $("top").getBoundingClientRect().bottom + 12 + "px");
+}
+function itemRow(i) {
+  const pick = S.picking ? `<input type="checkbox" class="pick" data-pick="${i.id}" ${S.picked.has(i.id) ? "checked" : ""} aria-label="Select for deleting">` : "";
+  const tag = i.disputes ? ` · <span class="tag">disputed</span>` : i.overdue ? ` · <span class="tag">due for review</span>` : "";
+  return `<div class="it ${i.valid ? "" : "gone"} ${S.selected === i.id ? "sel" : ""}" style="${i.area === "dormant" ? "opacity:.5" : ""}" data-id="${i.id}">${pick}${esc(i.statement)}
+       <small>${i.area}${i.uses ? ` · used ${i.uses}×` : ""} · ${day(i.created_at)}${i.scope !== "global" ? " · " + esc(scopeName(i.scope)) : ""}${tag}</small></div>`;
+}
+function listedIds() { return KView.selectable(S.v, S.f, S.on, S.match); }
+function sideHead() {
+  if (!S.picking) return `<div class="sidebar-head"><span></span><button class="btn" data-act="pick-start">Select to delete…</button></div>`;
+  const ids = listedIds();
+  const all = ids.length > 0 && ids.every((i) => S.picked.has(i));
+  const what = S.f.status.includes("gone") && S.v.pairs.length ? " no longer true" : "";
+  return `<div class="sidebar-head"><span>Pick items to delete for good</span>
+    ${ids.length ? `<button class="btn" data-act="${all ? "pick-none" : "pick-all"}">${all ? "Select none" : `Select all ${ids.length}${what}`}</button>` : ""}
+    <button class="btn" data-act="pick-cancel">Done</button></div>`;
+}
+function pickBar() {
+  if (!S.picking || !S.picked.size) return "";
+  const n = S.picked.size;
+  return `<div class="pickbar"><div class="act"><input id="delReason" placeholder="Why? (optional)" autocomplete="off">
+    <button class="btn danger" data-act="delete-picked">Delete ${n} item${n === 1 ? "" : "s"}</button></div>
+    <div class="note">Gone from the graph and from recall. Items that were linked through them stay linked. You can undo this.</div></div>`;
+}
+function deletedHtml() {
+  if (!S.f.status.includes("review") || !S.deleted.length) return "";
+  return `<div class="grp"><h2>Recently deleted <span>${S.deleted.length}</span></h2>${S.deleted.slice(0, 10).map((b) =>
+    `<div class="pair"><div>${esc(b.statements.slice(0, 3).join(" · "))}${b.statements.length > 3 ? ` · +${b.statements.length - 3} more` : ""}</div>
+     <small class="note">${esc(when(b.at))}${b.reason ? " · " + esc(b.reason) : ""}</small>
+     <div class="act" style="margin-top:6px"><button class="btn" data-act="undelete" data-batch="${b.batch}">Undo</button></div></div>`).join("")}</div>`;
+}
+function scopeOptions(list, group, f) {
+  if (!list.length) return "";
+  const opts = list.map((x) => `<option value="${esc(x.key)}" ${x.key === f.scope ? "selected" : ""} title="${esc(x.key)}">${esc(x.name)} (${x.items})</option>`).join("");
+  return group ? `<optgroup label="${group}">${opts}</optgroup>` : opts;
+}
+function scopeWhere(key) {
+  if (key === "global") return "global: recalled in any session";
+  const x = (S.data.scopes || []).find((s) => s.key === key);
+  const name = esc(x ? x.name : key.split("/").pop());
+  return x && x.topic
+    ? `topic ${name}: recalled when a session is about ${name}`
+    : `project ${name}: recalled in that project`;
+}
+function scopeName(key) {
+  const x = (S.data.scopes || []).find((s) => s.key === key);
+  return x ? x.name : key.split("/").pop();
+}
+function renderSide() {
+  renderSideBody();
+  $("side").insertAdjacentHTML("afterbegin", sideHead());
+  $("side").insertAdjacentHTML("beforeend", deletedHtml() + pickBar());
+}
+function renderSideBody() {
+  const on = S.on;
+  if (S.f.status.includes("gone") && S.v.pairs.length) {
+    const pairs = S.v.pairs.filter((p) => !S.match || S.match.has(p.old.id) || (p.by && S.match.has(p.by.id)));
+    const others = S.v.items.filter((i) => i.valid && on && on.has(i.id) && !pairs.some((p) => p.by && p.by.id === i.id));
+    $("side").innerHTML = `<div class="grp"><h2><i style="background:var(--bad)"></i>No longer true <span>${pairs.length}</span></h2>
+      ${pairs.map((p) => `<div class="pair">${itemRow(p.old)}<div class="arrow">${p.by ? "replaced by" : esc(p.old.invalid_reason || "marked by hand")}</div>${p.by ? itemRow(p.by) : ""}</div>`).join("")}</div>` +
+      (others.length ? `<div class="grp"><h2>Also matching <span>${others.length}</span></h2>${others.map(itemRow).join("")}</div>` : "");
+    return;
+  }
+  const items = S.v.items.filter((i) => !on || on.has(i.id));
+  if (!items.length) {
+    $("side").innerHTML = `<div class="empty">${S.data.items.length ? "Nothing matches." :
+      "Nothing has graduated yet. Sessions graduate when they end, compact, or go quiet; run <code>gm knowledge backfill</code> to graduate the existing ones."}</div>`;
+    return;
+  }
+  const by = {};
+  for (const i of items) (by[i.type] ||= []).push(i);
+  $("side").innerHTML = Object.keys(TYPE).filter((t) => by[t]).map((t) => `<div class="grp">
+    <h2><i style="background:${TYPE[t]}"></i>${TYPE_NAME[t]} <span>${by[t].length}</span></h2>
+    ${by[t].sort((a, b) => b.strength - a.strength || b.created_at.localeCompare(a.created_at)).map(itemRow).join("")}
+  </div>`).join("");
+}
+function renderLegend() {
+  $("legend").innerHTML = Object.entries(TYPE).map(([k, c]) => `<span><i style="background:${c}"></i>${k}</span>`).join("") +
+    `<span><i style="background:${ENTITY}"></i>entity</span>` +
+    `<span><i style="background:${rgba(TYPE.fact, 1)}"></i>old: solid</span>` +
+    `<span><i style="background:${rgba(TYPE.fact, 0.55)}"></i>survivor: see-through</span>` +
+    `<span><i style="background:${rgba(GREY, 0.6)}"></i>dormant: grey</span>` +
+    `<span><i style="background:#ff453a"></i>no longer true</span>` +
+    ["supersedes", "depends_on", "causes", "refines", "alternative", "same_area", "co_occurs", "co_used"]
+      .map((r) => `<span><i class="ln" style="background:${REL[r]}"></i>${r.replace("_", " ")}</span>`).join("");
+}
+
+async function load() {
+  try {
+    S.data = await api("/api/knowledge");
+  } catch (e) {
+    $("loading").textContent = "Could not load: " + e.message;
+    return;
+  }
+  $("loading").style.display = S.data.items.length ? "none" : "grid";
+  if (!S.data.items.length) $("loading").textContent = "No knowledge yet.";
+  try { S.deleted = (await api("/api/kreview")).deleted; } catch (e) { S.deleted = []; }
+  renderChips(); renderFilters(); renderLegend();
+  G.graphData(graphData()); renderSide();
+  openFromHash();
+}
+
+// /knowledge#<item id> (links from the Memory help page) opens that item; the camera
+// flies to it once the layout has settled.
+function openFromHash() {
+  const id = decodeURIComponent(location.hash.slice(1));
+  if (!id || !S.data.items.some((i) => i.id === id)) return;
+  select(id);
+  setTimeout(() => select(id, true), 1500);
+}
+window.addEventListener("hashchange", () => { if (S.data) openFromHash(); });
+
+async function select(id, fly = false) {
+  S.selected = id;
+  G.nodeColor(nodeColor).linkColor(linkColor);
+  renderSide();
+  if (fly) {
+    const n = G.graphData().nodes.find((x) => x.id === id);
+    if (n && n.x !== undefined) {
+      const r = 1 + 90 / Math.hypot(n.x, n.y, n.z || 1);
+      G.cameraPosition({ x: n.x * r, y: n.y * r, z: n.z * r }, n, 800);
+    }
+  }
+  let d;
+  try { d = await api(`/api/kitem?id=${encodeURIComponent(id)}`); } catch (e) { return; }
+  $("detail").innerHTML = d.item ? itemHtml(d) : entityHtml(d);
+  $("detail").classList.add("open");
+}
+function clear() {
+  S.selected = null; $("detail").classList.remove("open");
+  G.nodeColor(nodeColor).linkColor(linkColor); renderSide();
+}
+function head(kind, color, id, text) {
+  return `<div class="dh"><button class="close" data-act="close">×</button>
+    <div class="kind" style="color:${color}">${esc(kind)}</div><div class="id">${esc(id.slice(0, 12))}</div>
+    <p>${esc(text)}</p></div>`;
+}
+function itemHtml(d) {
+  const i = d.item;
+  let h = head(i.type, TYPE[i.type], i.item_id, i.statement);
+  if (i.why) h += `<div class="ds"><h3>Why</h3><p>${esc(i.why)}</p></div>`;
+  if (!i.invalid_at && i.disputes) {
+    h += `<div class="ds warn"><h3>Disputed ${day(i.disputed_at)}</h3>
+      <p>${esc(i.dispute_reason || "A reply contradicted it.")}</p>
+      <p class="note">Recall shows it with a warning; one more contradiction retracts it.</p>
+      <div class="act" style="margin-top:8px"><button class="btn" data-act="confirm" data-item="${i.item_id}">Still true</button></div></div>`;
+  } else if (!i.invalid_at && d.overdue) {
+    h += `<div class="ds warn"><h3>Due for review since ${day(d.review_due)}</h3>
+      <p>Not re-checked since ${day(d.checked)}. ${d.recallable ? "Recall shows it with a reminder to verify it." : "It is no longer recalled."}</p>
+      <div class="act" style="margin-top:8px"><button class="btn" data-act="confirm" data-item="${i.item_id}">Still true</button></div></div>`;
+  }
+  if (i.invalid_at) {
+    const by = d.neighbours.find((n) => n.relation === "supersedes" && !n.outgoing);
+    h += `<div class="ds stale"><h3>No longer true since ${day(i.invalid_at)}</h3>
+      ${by ? `<span class="nav" data-id="${by.id}">${esc(by.statement)}<small>${esc(by.reason)}</small></span>`
+        : `<p>${esc(i.invalid_reason || "Marked no longer true by hand.")}</p>`}
+      <div class="act" style="margin-top:8px"><button class="btn" data-act="restore" data-item="${i.item_id}">Make true again</button></div></div>`;
+  } else {
+    h += `<div class="ds"><div class="act" id="retractBox"><button class="btn danger" data-act="retract-ask">Mark no longer true…</button>
+      <button class="btn danger" data-act="delete-ask">Delete…</button></div></div>`;
+  }
+  h += `<div class="ds"><h3>Source</h3><dl class="kv"><dt>from</dt><dd>${esc(ORIGIN[i.origin] ?? i.origin)}${i.ref ? `<br>${/^https?:/.test(i.ref) ? `<a href="${esc(i.ref)}" target="_blank" rel="noopener">${esc(i.ref)}</a>` : esc(i.ref)}` : ""}</dd>
+    ${i.applies_to ? `<dt>applies to</dt><dd>${esc(i.applies_to)}</dd>` : ""}
+    <dt>changes</dt><dd>${esc(VOLATILITY[i.volatility] || i.volatility)}</dd>
+    <dt>confirmed</dt><dd>${day(d.checked)}${d.review_due ? ` · review ${day(d.review_due)}` : ""}</dd></dl></div>`;
+  h += `<div class="ds"><dl class="kv"><dt>scope</dt><dd title="${esc(i.scope)}">${scopeWhere(i.scope)}</dd>
+    <dt>true since</dt><dd>${day(i.valid_at)}</dd><dt>learned</dt><dd>${day(i.created_at)}</dd>
+    <dt>area</dt><dd>${esc(i.area)}</dd>
+    <dt>vitality</dt><dd>${(d.vitality ?? 0).toFixed(2)} (strength ${i.strength})</dd>
+    <dt>recalled</dt><dd>${i.recalls}× · used ${i.uses}×${i.last_used ? " · last " + day(i.last_used) : ""}</dd>
+    <dt>seen</dt><dd>in ${i.segments.length} segment(s)</dd></dl></div>`;
+  if (d.entities.length) h += `<div class="ds"><h3>About</h3>${d.entities.map((e) =>
+    `<span class="pill" data-id="${e.entity_id}">${esc(e.name)} · ${esc(e.kind)}</span>`).join("")}</div>`;
+  const nb = d.neighbours.filter((n) => !(n.relation === "supersedes" && !n.outgoing))
+    .sort((a, b) => b.weight - a.weight);
+  if (nb.length) h += `<div class="ds"><h3>Related</h3>${nb.map((n) =>
+    `<span class="nav" data-id="${n.id}" style="${n.valid ? "" : "opacity:.5"}">${esc(n.statement)}
+     <small><span style="color:${REL[n.relation]}">${n.relation.replace("_", " ")}</span> · ${n.weight} · ${n.origin}${n.reason ? " · " + esc(n.reason) : ""}</small></span>`).join("")}</div>`;
+  const learned = d.learned || [];
+  if (learned.length) h += `<div class="ds"><h3>Learned from</h3>${learned.map((g) =>
+    `<div class="nav" style="cursor:default">${esc(sessionName(g.session))} · ${g.exchanges} exchange${g.exchanges === 1 ? "" : "s"}
+     <small>${esc(TRIGGER[g.trigger] || g.trigger)} · ${esc(when(g.from))} – ${esc(when(g.to))}</small></div>`).join("")}
+    <p class="note">The exchanges themselves are gone: memory keeps what was learned, not the conversation.</p></div>`;
+  return h;
+}
+function entityHtml(d) {
+  const e = d.entity;
+  let h = head(e.kind, ENTITY, e.entity_id, e.name);
+  h += `<div class="ds"><dl class="kv">${e.summary ? `<dt>what</dt><dd>${esc(e.summary)}</dd>` : ""}
+    ${e.aliases.length ? `<dt>also called</dt><dd>${esc(e.aliases.join(", "))}</dd>` : ""}
+    <dt>mentions</dt><dd>${e.mentions}</dd></dl></div>`;
+  h += `<div class="ds"><h3>Items about it</h3>${d.items.map((i) =>
+    `<span class="nav" data-id="${i.item_id}" style="${i.invalid_at ? "opacity:.5" : ""}">${esc(i.statement)}<small>${i.type}</small></span>`).join("")}</div>`;
+  return h;
+}
+
+async function act(kind, id, reason) {
+  try { await api(`/api/k${kind}`, { id, reason }); } catch (e) { alertBox(e.message); return; }
+  await reload();
+  select(id);
+}
+async function reload() {
+  S.data = await api("/api/knowledge");
+  try { S.deleted = (await api("/api/kreview")).deleted; } catch (e) { S.deleted = []; }
+  renderChips(); applyFilters();
+}
+let toastTimer = null;
+function toast(html) {
+  $("toast").innerHTML = html; $("toast").classList.add("show");
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => $("toast").classList.remove("show"), 9000);
+}
+async function remove(ids, reason) {
+  let res;
+  try { res = await api("/api/kdelete", { ids, reason }); } catch (e) { alertBox(e.message); return; }
+  S.picked.clear(); S.picking = false;
+  if (ids.includes(S.selected)) clear();
+  await reload();
+  const n = res.deleted.length;
+  toast(`<span>Deleted ${n} item${n === 1 ? "" : "s"}${res.bridges ? `, ${res.bridges} bridge link${res.bridges === 1 ? "" : "s"} added` : ""}</span>
+    <button class="btn" data-act="undelete" data-batch="${res.batch}">Undo</button>`);
+}
+async function undelete(batch) {
+  try { await api("/api/kundelete", { batch }); } catch (e) { toast(`<span>${esc(e.message)}</span>`); return; }
+  $("toast").classList.remove("show");
+  await reload();
+}
+function alertBox(msg) {
+  const box = $("retractBox") || $("detail");
+  box.insertAdjacentHTML("beforeend", `<div class="note" style="color:var(--bad)">${esc(msg)}</div>`);
+}
+document.addEventListener("click", (ev) => {
+  const t = ev.target.closest("[data-id],[data-act],[data-f]");
+  if (!t) return;
+  if (t.dataset.f === "clear") { S.f = KView.defaults(); return applyFilters(); }
+  if (t.dataset.f) { S.f[t.dataset.f] = KView.toggle(S.f[t.dataset.f], t.dataset.v); return applyFilters(); }
+  if (t.dataset.act === "close") return clear();
+  if (t.dataset.act === "retract-ask") {
+    $("retractBox").innerHTML = `<input id="reason" placeholder="Why is it no longer true? (optional)" autocomplete="off">
+      <button class="btn danger" data-act="retract">Mark</button><button class="btn" data-act="retract-cancel">Cancel</button>
+      <div class="note" style="flex-basis:100%">It stays in history and is never recalled again. You can undo this.</div>`;
+    $("reason").focus();
+    return;
+  }
+  if (t.dataset.act === "retract-cancel") return select(S.selected);
+  if (t.dataset.act === "confirm") return act("confirm", t.dataset.item);
+  if (t.dataset.act === "delete-ask") {
+    $("retractBox").innerHTML = `<input id="reason" placeholder="Why delete it? (optional)" autocomplete="off">
+      <button class="btn danger" data-act="delete-one">Delete</button><button class="btn" data-act="retract-cancel">Cancel</button>
+      <div class="note" style="flex-basis:100%">For noise that was never worth keeping. It leaves the graph; items linked through it stay linked. You can undo this.</div>`;
+    $("reason").focus();
+    return;
+  }
+  if (t.dataset.act === "delete-one") return remove([S.selected], ($("reason") || {}).value || "");
+  if (t.dataset.act === "pick-start") { S.picking = true; return renderSide(); }
+  if (t.dataset.act === "pick-all") { for (const i of listedIds()) S.picked.add(i); return renderSide(); }
+  if (t.dataset.act === "pick-none") { for (const i of listedIds()) S.picked.delete(i); return renderSide(); }
+  if (t.dataset.act === "pick-cancel") { S.picking = false; S.picked.clear(); return renderSide(); }
+  if (t.dataset.act === "delete-picked") return remove([...S.picked], ($("delReason") || {}).value || "");
+  if (t.dataset.act === "undelete") return undelete(t.dataset.batch);
+  if (t.dataset.act === "retract") return act("retract", S.selected, ($("reason") || {}).value || "");
+  if (t.dataset.act === "restore") return act("restore", t.dataset.item);
+  if (t.dataset.id) select(t.dataset.id, true);
+});
+// picking rows to delete: the checkbox, not the row, so the row still opens its detail
+document.addEventListener("click", (ev) => {
+  const box = ev.target.closest("input[data-pick]");
+  if (!box) return;
+  ev.stopPropagation();
+  if (box.checked) S.picked.add(box.dataset.pick); else S.picked.delete(box.dataset.pick);
+  renderSide();
+}, true);
+document.addEventListener("change", (ev) => {
+  if (ev.target.id === "scope") { S.f.scope = ev.target.value; applyFilters(); }
+  if (ev.target.id === "withGlobal") { S.f.withGlobal = ev.target.checked; applyFilters(); }
+});
+$("showEnt").onchange = (e) => { S.showEnt = e.target.checked; G.graphData(graphData()); };
+$("search").oninput = (e) => {
+  const q = e.target.value.trim().toLowerCase();
+  if (!q) S.match = null;
+  else {
+    S.match = new Set();
+    const ents = new Set(S.data.entities.filter((x) => x.name.toLowerCase().includes(q)).map((x) => x.id));
+    for (const i of S.data.items)
+      if ((i.statement + " " + i.why).toLowerCase().includes(q) || i.entities.some((x) => ents.has(x))) S.match.add(i.id);
+    for (const x of ents) S.match.add(x);
+  }
+  refreshShown(); G.nodeColor(nodeColor).linkColor(linkColor); renderSide();
+};
+document.addEventListener("keydown", (e) => {
+  if (e.key === "/" && document.activeElement !== $("search")) { e.preventDefault(); $("search").focus(); }
+  if (e.key === "Escape") clear();
+  if (e.key === "Enter" && document.activeElement && document.activeElement.id === "reason") {
+    if (document.querySelector('[data-act="delete-one"]')) remove([S.selected], $("reason").value);
+    else act("retract", S.selected, $("reason").value);
+  }
+});
+window.addEventListener("resize", () => { G.width(innerWidth).height(innerHeight); fitTop(); });
+load();
+</script>
+</body>
+</html>

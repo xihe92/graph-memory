@@ -1,0 +1,42 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "graph-memory"
+version = "0.1.0"
+description = "Memory for Claude Code: session turns distilled into a knowledge graph and recalled before each reply"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md", "LICENSES/*"]
+requires-python = ">=3.11"
+dependencies = [
+    "networkx>=3.2",
+    "numpy>=1.26",
+    "pydantic>=2.6",
+    "chromadb>=1.0",
+]
+
+[project.scripts]
+gm = "graph_memory.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "mypy>=1.10", "ruff>=0.5", "types-networkx"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/graph_memory"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "B", "UP", "I"]
+
+[tool.mypy]
+strict = true
+files = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["slow: loads the real embedding model or calls claude"]
+addopts = "-m 'not slow'"

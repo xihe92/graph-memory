@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sessions</title>
+<style>
+  /* What memory holds right now: each live session's chain of summaries and exchanges,
+     waiting to graduate. Same dark world as the Knowledge page. */
+  :root {
+    --bg: #0a0d13; --panel: rgba(16, 20, 29, 0.88); --panel-solid: #121722;
+    --line: rgba(255, 255, 255, 0.08); --line-strong: rgba(255, 255, 255, 0.16);
+    --text: #e6e9f0; --muted: #8b93a7; --faint: #5b6377; --accent: #ffe066;
+    --exchange: #64a8ff; --summary: #ffb84d; --session: #c9ced8; --graduated: #3ddc97;
+    --asking: #f4f6fa; --bad: #ff453a;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; overflow: hidden; }
+  #graph { position: fixed; inset: 0; }
+  button { font: inherit; color: inherit; }
+  .panel { position: fixed; background: var(--panel); border: 1px solid var(--line);
+    border-radius: 14px; backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    box-shadow: 0 12px 40px rgba(0,0,0,.35); }
+  #top { top: 14px; left: 14px; right: 14px; min-height: 52px; display: flex; align-items: center;
+    gap: 10px 16px; padding: 8px 14px; flex-wrap: wrap; }
+  #top h1 { font-size: 14px; font-weight: 650; margin: 0; white-space: nowrap; }
+  #top h1 span { color: var(--accent); }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; }
+  .chip { padding: 3px 9px; border-radius: 999px; background: rgba(255,255,255,.05);
+    border: 1px solid var(--line); color: var(--muted); white-space: nowrap; font-size: 12px; }
+  .chip b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+  .spacer { flex: 1; }
+  .btn { background: rgba(255,255,255,.06); border: 1px solid var(--line-strong); border-radius: 8px;
+    padding: 5px 11px; cursor: pointer; white-space: nowrap; text-decoration: none; color: var(--text); }
+  .btn:hover { background: rgba(255,255,255,.12); }
+  .btn.danger { border-color: rgba(255,69,58,.6); }
+  .btn.danger:hover { background: rgba(255,69,58,.18); }
+  button:focus-visible, a:focus-visible, .it:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  #side { top: 80px; left: 14px; bottom: 14px; width: 330px; overflow: auto; }
+  .grp h2 { position: sticky; top: 0; margin: 0; padding: 10px 14px 6px; background: var(--panel-solid);
+    font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); z-index: 1; }
+  .it { padding: 8px 14px; cursor: pointer; border-bottom: 1px solid rgba(255,255,255,.03); }
+  .it:hover { background: rgba(255,255,255,.05); }
+  .it.sel { background: rgba(255,224,102,.08); box-shadow: inset 2px 0 var(--accent); }
+  .it small { color: var(--faint); font-size: 11px; display: block; }
+  .it .counts { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .grad a { display: block; color: var(--text); text-decoration: none; padding: 2px 0 2px 10px;
+    border-left: 2px solid var(--line-strong); margin: 3px 0; font-size: 12.5px; }
+  .grad a:hover { border-left-color: var(--accent); }
+  .grad a i { font-style: normal; color: var(--faint); font-size: 10.5px; text-transform: uppercase; margin-right: 5px; }
+  .empty { color: var(--faint); padding: 12px 14px; font-size: 12.5px; }
+  #detail { top: 80px; right: 14px; bottom: 14px; width: 440px; overflow: auto;
+    transform: translateX(480px); transition: transform .22s ease; }
+  #detail.open { transform: none; }
+  .dh { position: sticky; top: 0; background: var(--panel-solid); padding: 14px 16px 12px;
+    border-bottom: 1px solid var(--line); border-radius: 14px 14px 0 0; }
+  .dh .kind { font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+  .dh .meta { font-family: var(--mono); color: var(--muted); font-size: 11.5px; }
+  .dh .close { position: absolute; top: 10px; right: 10px; background: none; border: 0;
+    color: var(--muted); font-size: 18px; cursor: pointer; }
+  .ds { padding: 12px 16px; border-bottom: 1px solid var(--line); }
+  .ds h3 { margin: 0 0 6px; font-size: 11px; font-weight: 600; letter-spacing: .08em;
+    text-transform: uppercase; color: var(--muted); }
+  .text { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }
+  .q { border-left: 2px solid var(--exchange); padding-left: 9px; color: #c8dcff; }
+  .pill { display: inline-block; font-family: var(--mono); font-size: 11px; padding: 1px 7px; border-radius: 5px;
+    background: rgba(255,255,255,.07); color: var(--muted); margin: 0 4px 4px 0; overflow-wrap: anywhere; }
+  .note { color: var(--muted); font-size: 12px; margin: 8px 0 0; }
+  #legend { left: 360px; bottom: 14px; padding: 9px 14px; display: flex; flex-wrap: wrap;
+    gap: 4px 14px; font-size: 11.5px; color: var(--muted); }
+  #legend i { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; }
+  #loading { position: fixed; inset: 0; display: grid; place-items: center; color: var(--muted);
+    pointer-events: none; text-align: center; padding: 0 20px; }
+  #toast { left: 50%; bottom: 20px; transform: translateX(-50%); padding: 8px 14px; display: none; }
+  #toast.on { display: block; }
+  #toast.err { border-color: var(--bad); }
+  .tip { background: var(--panel-solid); border: 1px solid var(--line-strong); border-radius: 8px;
+    padding: 6px 9px; max-width: 340px; color: var(--text); font: 12px/1.4 system-ui, sans-serif; }
+  @media (max-width: 900px) {
+    #side { width: auto; right: 14px; bottom: auto; max-height: 34vh; }
+    #detail { width: auto; left: 14px; top: auto; height: 55vh; transform: translateY(110%); }
+    #legend { display: none; }
+  }
+</style>
+</head>
+<body>
+<div id="graph"></div>
+<div id="loading">Loading sessions…</div>
+<header id="top" class="panel">
+  <h1>Memory <span>Sessions</span></h1>
+  <div class="chips" id="chips"></div>
+  <div class="spacer"></div>
+  <a class="btn" href="/help">Memory help</a>
+  <a class="btn" href="/knowledge">Knowledge →</a>
+</header>
+<aside id="side" class="panel"></aside>
+<section id="detail" class="panel" aria-live="polite"></section>
+<footer id="legend" class="panel">
+  <span><i style="background:var(--session)"></i>session</span>
+  <span><i style="background:var(--graduated)"></i>graduated: what it taught (the exchanges are gone)</span>
+  <span><i style="background:var(--summary)"></i>summary of graduated exchanges</span>
+  <span><i style="background:var(--exchange)"></i>exchange waiting to graduate</span>
+  <span><i style="background:var(--asking)"></i>prompt waiting for its reply</span>
+</footer>
+<div id="toast" class="panel" role="status"></div>
+
+<script src="/vendor/3d-force-graph.min.js"></script>
+<script src="/idle.js"></script>
+<script>
+"use strict";
+const TOKEN = "__GM_TOKEN__";
+const COLOR = { session: "#c9ced8", summary: "#ffb84d", exchange: "#64a8ff", graduated: "#3ddc97", asking: "#f4f6fa" };
+const TRIGGER = { compact: "at a compaction", session_end: "when the session ended", idle: "after 20 quiet minutes",
+  sweep: "when the daemon started", abandoned: "when the session was abandoned", manual: "by hand",
+  rebuild: "again from its transcript", folded: "and its summaries folded into one" };
+const S = { data: null, version: null, selected: null, focus: null, fitted: false };
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const when = (iso) => (iso ? new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "");
+const ago = (iso) => {
+  const m = Math.round((Date.now() - new Date(iso)) / 60000);
+  return m < 1 ? "just now" : m < 60 ? `${m} min ago` : m < 1440 ? `${Math.round(m / 60)} h ago` : `${Math.round(m / 1440)} d ago`;
+};
+const short = (key) => "session " + String(key).split(":").pop().slice(0, 8);
+const project = (key) => (key ? key.replace(/^repo:/, "").split("/").filter(Boolean).pop() : "no project");
+
+async function api(path, body) {
+  const opts = { headers: { "X-GM-Token": TOKEN } };
+  if (body !== undefined) {
+    opts.method = "POST"; opts.body = JSON.stringify(body);
+    opts.headers["Content-Type"] = "application/json";
+  }
+  const r = await fetch(path, opts);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || r.statusText);
+  return data;
+}
+let toastTimer = null;
+function toast(msg, err = false) {
+  const t = $("toast");
+  t.textContent = msg; t.className = "panel on" + (err ? " err" : "");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => (t.className = "panel"), err ? 4500 : 2200);
+}
+
+const G = ForceGraph3D({ controlType: "orbit" })($("graph"))
+  .backgroundColor("#0a0d13").showNavInfo(false).nodeId("id")
+  .nodeRelSize(4).nodeOpacity(0.95).nodeResolution(14)
+  .nodeVal((n) => (n.kind === "session" ? 3 : n.kind === "summary" || n.kind === "graduated" ? 2.2 : 1))
+  .nodeColor((n) => (S.focus && n.session !== S.focus ? "rgba(120,128,145,0.18)" : COLOR[n.kind]))
+  .nodeLabel((n) => `<div class="tip"><small>${n.kind}</small>${esc(n.label)}</div>`)
+  .linkColor(() => "rgba(255,255,255,0.22)").linkWidth(1.2)
+  .linkDirectionalArrowLength(3).linkDirectionalArrowRelPos(1)
+  .onNodeClick((n) => select(n.id, true))
+  .onBackgroundClick(() => closeDetail())
+  .cooldownTicks(200);  // the layout settles in 2-3s, not the library's 15s
+GraphIdle.quietWhenStill(G);  // stop drawing while nothing moves: an open page stays cool
+
+function graphData() {
+  const nodes = [], links = [];
+  for (const s of S.data.sessions) {
+    nodes.push({ id: "s:" + s.session, kind: "session", session: s.session, label: `${short(s.session)} · ${project(s.project)}` });
+    let prev = "s:" + s.session;
+    for (const r of s.records) {
+      const label = r.kind === "summary" ? `Summary of ${r.exchanges} exchanges: ${r.text}`
+        : r.kind === "graduated" ? `${r.exchanges} exchanges graduated ${TRIGGER[r.trigger] || r.trigger}: ${r.items.length} items`
+        : r.kind === "asking" ? `Waiting for the reply: ${r.prompt}` : r.prompt;
+      nodes.push({ id: r.id, kind: r.kind, session: s.session, label: label.slice(0, 160) });
+      links.push({ source: prev, target: r.id });
+      prev = r.id;
+    }
+  }
+  return { nodes, links };
+}
+
+function record(id) {
+  for (const s of S.data.sessions) {
+    if ("s:" + s.session === id) return { session: s, rec: null };
+    const rec = s.records.find((r) => r.id === id);
+    if (rec) return { session: s, rec };
+  }
+  return null;
+}
+
+function renderChips() {
+  const ses = S.data.sessions;
+  const ex = ses.reduce((n, s) => n + s.waiting, 0);
+  const sum = ses.reduce((n, s) => n + s.records.filter((r) => r.kind === "summary" || r.kind === "graduated").length, 0);
+  $("chips").innerHTML = `<span class="chip"><b>${ses.length}</b> live sessions</span>
+    <span class="chip"><b>${ex}</b> exchanges waiting</span><span class="chip"><b>${sum}</b> graduations so far</span>
+    <span class="chip"><b>${S.data.graduated.length}</b> graduations in 3 days</span>`;
+}
+
+function renderSide() {
+  const live = S.data.sessions.map((s) => {
+    const grads = s.records.filter((r) => r.kind === "summary" || r.kind === "graduated").length;
+    const asking = s.records.some((r) => r.kind === "asking");
+    return `<div class="it${S.focus === s.session ? " sel" : ""}" tabindex="0" data-session="${esc(s.session)}">
+      ${esc(project(s.project))} · ${esc(short(s.session))}
+      <span class="counts">${s.waiting} waiting${grads ? ` · ${grads} graduated` : ""}${asking ? " · replying now" : ""}</span>
+      <small>active ${esc(ago(s.last))}</small></div>`;
+  }).join("") || `<div class="empty">No live session. A session appears here when you send a prompt, and leaves when it ends.</div>`;
+  const grads = S.data.graduated.map((g) => `<div class="it grad" style="cursor:default">
+      ${esc(short(g.session))} · ${g.exchanges} exchange${g.exchanges === 1 ? "" : "s"}
+      <small>graduated ${esc(TRIGGER[g.trigger] || g.trigger)}, ${esc(when(g.at))} · ${g.items.length ? `${g.items.length} item${g.items.length === 1 ? "" : "s"}` : "nothing worth keeping"}</small>
+      ${g.items.map((i) => `<a href="/knowledge#${encodeURIComponent(i.id)}"><i>${esc(i.type)}${i.new ? "" : " · again"}</i>${esc(i.statement)}</a>`).join("")}
+    </div>`).join("") || `<div class="empty">Nothing graduated in the last three days.</div>`;
+  $("side").innerHTML = `<div class="grp"><h2>Live sessions</h2>${live}</div>
+    <div class="grp"><h2>Graduated recently</h2>${grads}</div>`;
+  $("side").querySelectorAll("[data-session]").forEach((el) => {
+    const pick = () => { S.focus = S.focus === el.dataset.session ? null : el.dataset.session; G.nodeColor(G.nodeColor()); renderSide(); if (S.focus) select("s:" + S.focus, true); };
+    el.addEventListener("click", pick);
+    el.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(); } });
+  });
+}
+
+function head(kind, color, meta, extra = "") {
+  return `<div class="dh"><button class="close" aria-label="Close" onclick="closeDetail()">×</button>
+    <div class="kind" style="color:${color}">${kind}</div><div class="meta">${meta}</div>${extra}</div>`;
+}
+function detailHtml(found) {
+  const { session: s, rec: r } = found;
+  if (!r) {
+    const ex = s.waiting;
+    return head("session", COLOR.session, `${esc(s.session)}`) +
+      `<div class="ds"><p class="text">${esc(project(s.project))}: ${ex} exchange${ex === 1 ? "" : "s"} waiting, active ${esc(ago(s.last))}.</p>
+       <p class="note">It graduates when it compacts, after 20 quiet minutes, or when it ends. When it ends, everything here goes and only the knowledge stays.</p></div>` +
+      (ex ? `<div class="ds"><button class="btn" id="graduate">Graduate now</button>
+       <p class="note">Turns the ${ex} waiting exchange${ex === 1 ? "" : "s"} into knowledge now; the session goes on.</p></div>` : "");
+  }
+  if (r.kind === "asking") {
+    return head("prompt in progress", COLOR.asking, esc(when(r.ts))) +
+      `<div class="ds"><h3>Prompt</h3><p class="text q">${esc(r.prompt)}</p></div>
+       <div class="ds"><p class="note">Stored as an exchange when the reply arrives.</p></div>`;
+  }
+  if (r.kind === "graduated") {
+    const items = r.items.map((i) => `<a class="pill" style="display:block;white-space:normal" href="/knowledge#${encodeURIComponent(i.id)}">${esc(i.type)}${i.new ? "" : " · seen again"}${i.valid ? "" : " · no longer true"}: ${esc(i.statement)}</a>`).join("");
+    return head("graduated", COLOR.graduated, `${esc(when(r.start))} – ${esc(when(r.end))} · ${r.exchanges} exchanges`) +
+      `<div class="ds"><h3>Graduated ${esc(TRIGGER[r.trigger] || r.trigger)}, ${esc(when(r.ts))}</h3>${items || `<p class="note">Nothing worth keeping was learned from these exchanges.</p>`}</div>
+       <div class="ds"><p class="note">The exchanges themselves are gone: memory keeps what they taught.</p></div>`;
+  }
+  if (r.kind === "summary") {
+    const times = r.graduations > 1 ? `${r.graduations} graduations; the last ` : "Graduated ";
+    const items = r.items.map((i) => `<a class="pill" style="display:block;white-space:normal" href="/knowledge#${encodeURIComponent(i.id)}">${esc(i.type)}${i.valid ? "" : " · no longer true"}: ${esc(i.statement)}</a>`).join("");
+    return head("summary", COLOR.summary, `${esc(when(r.start))} – ${esc(when(r.end))} · ${r.exchanges} exchanges`) +
+      `<div class="ds"><h3>The session so far</h3><p class="text">${esc(r.text)}</p></div>` +
+      `<div class="ds"><h3>Learned</h3>${items || `<p class="note">Nothing new to keep yet.</p>`}</div>` +
+      `<div class="ds"><p class="note">${times}${esc(TRIGGER[r.trigger] || r.trigger)}, ${esc(when(r.ts))}. The exchanges it replaced are gone; the next graduation of this session reads this summary and writes the next one.</p></div>`;
+  }
+  const files = (r.files || []).map((f) => `<span class="pill">${esc(f.path)}</span>`).join("");
+  const cmds = (r.commands || []).map((c) => `<span class="pill">${esc(c)}</span>`).join("");
+  return head("exchange", COLOR.exchange, `${esc(when(r.ts))}${r.project ? " · " + esc(project(r.project)) : ""}`) +
+    `<div class="ds"><h3>Prompt</h3><p class="text q">${esc(r.prompt)}</p></div>
+     <div class="ds"><h3>Reply</h3><p class="text">${esc(r.reply)}</p></div>` +
+    (files ? `<div class="ds"><h3>Files</h3>${files}</div>` : "") +
+    (cmds ? `<div class="ds"><h3>Commands</h3>${cmds}</div>` : "") +
+    `<div class="ds"><button class="btn danger" id="forget">Forget this exchange</button>
+      <p class="note">Removes it before it can turn into knowledge, for something recorded by mistake.</p></div>`;
+}
+
+function select(id, fly = false) {
+  const found = record(id);
+  if (!found) return closeDetail();
+  S.selected = id;
+  $("detail").innerHTML = detailHtml(found);
+  $("detail").classList.add("open");
+  const g = $("graduate");
+  if (g) g.addEventListener("click", async () => {
+    try {
+      g.disabled = true;
+      await api("/api/graduate", { session: found.session.session });
+      toast("Graduating: the summary appears when it is done");
+    } catch (e) { g.disabled = false; toast("Could not graduate it: " + e.message, true); }
+  });
+  const f = $("forget");
+  if (f) f.addEventListener("click", async () => {
+    try {
+      await api("/api/forget", { session: found.session.session, id });
+      toast("Forgotten"); closeDetail(); await load(true);
+    } catch (e) { toast("Could not forget it: " + e.message, true); }
+  });
+  if (fly) {
+    const n = G.graphData().nodes.find((x) => x.id === id);
+    if (n && n.x !== undefined) {
+      const r = 1 + 70 / Math.hypot(n.x, n.y, n.z || 1);
+      G.cameraPosition({ x: n.x * r, y: n.y * r, z: n.z * r }, n, 700);
+    }
+  }
+}
+function closeDetail() { S.selected = null; $("detail").classList.remove("open"); }
+window.closeDetail = closeDetail;
+
+async function load(force = false, poll = false) {
+  const q = new URLSearchParams();
+  if (S.version != null && !force) q.set("since", S.version);
+  if (poll) q.set("poll", "1");  // a background refresh: doesn't keep the daemon awake
+  const data = await api("/api/sessions" + (q.size ? "?" + q : ""));
+  if (data.unchanged) return false;
+  S.data = data; S.version = data.version;
+  const empty = !data.sessions.length;
+  $("loading").style.display = empty ? "grid" : "none";
+  if (empty) $("loading").textContent = "No live session right now. One appears when you send a prompt.";
+  G.graphData(graphData());
+  renderChips(); renderSide();
+  if (S.selected) { if (record(S.selected)) select(S.selected); else closeDetail(); }
+  if (!S.fitted && !empty) { S.fitted = true; setTimeout(() => G.zoomToFit(600, 60), 1500); }
+  return true;
+}
+
+load(true).catch((e) => { $("loading").textContent = "Could not load sessions: " + e.message; });
+setInterval(() => { if (!document.hidden) load(false, true).catch(() => {}); }, 4000);
+</script>
+</body>
+</html>
