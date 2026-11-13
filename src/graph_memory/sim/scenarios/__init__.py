@@ -20,6 +20,7 @@ SCENARIOS: dict[str, Callable[[], Scenario]] = {
     "stale_knowledge": learning.stale_knowledge,
     "delete_and_bridge": learning.delete_and_bridge,
     "topic_scope": learning.topic_scope,
+    "summarize_scope": learning.summarize_scope,
     "project_isolation": world.project_isolation,
     "entity_names": world.entity_names,
     "crash_and_restart": robustness.crash_and_restart,

@@ -1,12 +1,15 @@
 # How graph-memory works
 
-graph-memory gives Claude Code a memory that lasts across sessions. It does three jobs:
+graph-memory gives Claude Code a memory that lasts across sessions. It does three jobs
+for Claude, and a fourth thing for you:
 
 1. **Remember**: it records each turn of a session, then distils the turns into lasting
    knowledge.
 2. **Recall**: before each reply, it shows Claude the few notes that apply to the prompt.
 3. **Archive**: it decides what is kept, what fades, what is retired as no longer true,
    and what is removed.
+4. **Summaries**: on request, it writes you a brief of what it knows about one project
+   or topic.
 
 This page explains each job with diagrams and examples. Most examples follow one made-up
 story: a session that sketches a recipe app's database in SQLite outside any repository,
@@ -654,6 +657,7 @@ it.
 | A session's summary | Until the session ends, or 7 days without activity | The session's folder is deleted |
 | Exchanges whose graduation keeps failing | 3 failures, or 3 days | Dropped, and a `buffer_dropped` event is logged |
 | Knowledge items | For good | They fade, retire or get deleted by hand, as described below |
+| A summary of a project or topic | In `summaries.json`, until it is written again | Marked out of date when its notes change (section 4) |
 | Deleted items | In `knowledge_deleted.jsonl` | `gm knowledge undelete <batch>` puts them back |
 | The event log (`events.jsonl`) | 30 days (`events_days`) | Pruned once a day |
 | Claude Code's own transcripts | 30 days, by Claude Code | Until then, `gm knowledge regraduate` can rebuild a session's knowledge from them |
@@ -759,3 +763,84 @@ it back and removes its bridges.
 every exchange for good. It packs the old files into `archive-<date>.tar.gz`, checks the
 archive opens, and only then deletes them. The archive is yours to keep or delete; the
 system never reads it again.
+
+---
+
+## 4. Summaries
+
+Recall is for Claude: a few notes per prompt. A summary is for you: a brief of
+everything memory knows about one project or topic, so you don't have to read a list of
+200 notes to see where something stands.
+
+```mermaid
+flowchart TD
+    S["You pick a project or topic<br/>and press Summarize"] --> N["Its notes that are still true"]
+    N --> M["One model call, in the background"]
+    M --> B["Brief: overview + 6 sections,<br/>each point cites its notes"]
+    B --> C[("summaries.json<br/>a cache, not knowledge")]
+    C --> P["Knowledge page<br/>or gm knowledge summarize"]
+    K["Later: notes added, removed,<br/>reworded or disputed"] -.-> R
+    P -.-> R["Marked out of date,<br/>with a Refresh button"]
+```
+
+### 4.1 How one is written
+
+On the Knowledge page, pick a scope and press **Summarize**; on the command line, run
+`gm knowledge summarize <scope>` with `global`, `topic:<name>` or a project's name. A
+note has exactly one scope, so a summary covers one project, one topic, or your global
+notes.
+
+The daemon collects the scope's notes that are still true and gives them to the model
+(Haiku by default, the same as graduation) in one call. Each note goes in with an id, its
+type, the date it was last confirmed and its reason; a disputed note is marked as
+disputed:
+
+```
+K1 [decision, 2026-11-08] recipe_tag's primary key is (recipe_id, tag_id) (why: adding the same tag twice becomes a no-op)
+K2 [pitfall, 2026-11-08] Index recipe_tag.tag_id, or deleting a tag scans the whole join table
+K3 [learned, 2026-11-09, disputed: the docs show RENAME COLUMN] Renaming a column means recreating the table
+```
+
+The model answers with an overview and up to 8 points in each of six sections:
+
+| Section | What goes in it |
+|---|---|
+| Where it stands | The current state: what is done and what is in progress |
+| Decisions and why | The decisions that shape it, each with its reason |
+| How it works | The facts and procedures someone needs to work on it |
+| Preferences | How you want things done there |
+| Pitfalls | What went wrong before and what to avoid |
+| Open items | What is unfinished or undecided |
+
+The call runs in the same background queue as graduation. It takes a few seconds for a
+small topic and about a minute for 200 notes. If a scope has more than 120,000
+characters of notes, the least alive ones are left out and the brief says how many.
+
+### 4.2 Three rules
+
+**Every point cites its notes.** The model must name the notes each point rests on, and
+the daemon drops any point that cites no note it was given. So a summary can merge and
+shorten, but each sentence can be checked:
+
+```json
+{"text": "Tagging a recipe twice is a no-op, because recipe_tag is keyed on both ids.",
+ "notes": ["3b9d07e2a4c15f86"]}
+```
+
+On the page each citation is a small number. Clicking it opens that note next to the
+summary. This also makes a summary a quick way to find notes that are wrong or out of
+date: a point that looks wrong leads straight to the note behind it, where you can mark
+it no longer true.
+
+**A summary is a view, not knowledge.** It is kept in `~/.graph-memory/summaries.json`,
+apart from `knowledge.json`. It is never stored as a note and never recalled into a
+session. Otherwise memory would hold a second, shorter copy of itself that could drift
+from the notes.
+
+**It is marked when out of date, not rewritten.** A summary remembers which notes it was
+written from, with a fingerprint of each one's words and whether it was disputed. When
+you open it later, the daemon compares that with the scope as it is now and counts the
+notes that were added, removed (deleted, retired or moved to another scope), reworded
+or disputed. The page then says, for example, "5 notes have changed since this summary
+was written" and offers **Refresh**. Being recalled or used does not count as a change.
+The command line writes the summary again whenever that count is not zero.

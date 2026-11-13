@@ -78,6 +78,7 @@ exchange that started the task.
 | `gm knowledge rescope [--wait]` | The model reads every item and proposes where it should be recalled (project, topic, global); nothing changes yet. `--wait` shows the proposal |
 | `gm knowledge rescope --apply` | Keep the proposal (an item whose scope changed since keeps its own) |
 | `gm knowledge scope <id>… --to <scope>` | Set items' scope by hand: `global`, `topic:<name>`, or a project's name |
+| `gm knowledge summarize <scope> [--force]` | Print a brief of what memory knows about one project or topic (`global`, `topic:<name>`, or a project's name). The model writes it when notes changed since the last one; `--force` writes it again anyway |
 | `gm stats [--since 24h\|7d\|all] [--json]` | Hook latency, graduations, the buffer, and **Memory help**: how often recall gave Claude notes and replies used them |
 | `gm ui [--no-open] [--port N]` | Open the web page (below); starts the daemon if needed |
 | `gm migrate [--dry-run]` | Move a memory from before the knowledge-only redesign (once; see below) |
@@ -288,12 +289,32 @@ in the memory home, so an open page keeps working after the daemon restarts.
   it no longer true or true again. "Select to delete…" puts a checkbox on each listed item;
   "Select all" ticks every item the list shows (with the "no longer true" filter: every
   item no longer true, not what replaced it). Filter chips by status, area and scope highlight the
-  matching items and fade the rest. `/knowledge#<id>` opens one item.
+  matching items and fade the rest. `/knowledge#<id>` opens one item. With a scope
+  picked, **Summarize** opens a brief of that project or topic (see Summaries below).
 - **Memory help** (`/help`): per day, how many prompts got notes and how many replies
   used one, the model's verdicts on sampled turns, the most used notes, notes shown but
   never used, why prompts got no notes, and every prompt with its notes.
 
 The 3D library (3d-force-graph, MIT) is vendored, so the page works offline.
+
+### Summaries
+
+A summary is a brief of what memory knows about one project or topic, for you to read:
+an overview, then where it stands, decisions and why, how it works, preferences, pitfalls
+and open items. Pick a scope on the Knowledge page and press **Summarize**, or run
+`gm knowledge summarize <scope>`.
+
+- **One model call, on demand.** The model (Haiku by default, as for graduation) reads
+  the scope's notes that are still true, at most 120,000 characters of them; past that
+  the least alive notes are left out and the brief says how many. It runs in the daemon's
+  background queue and takes from a few seconds to about a minute for 200 notes.
+- **Every point cites its notes.** A point that cites no note it was given is dropped.
+  On the page each citation is a number: click it to open the note.
+- **A view, not knowledge.** Summaries are kept in `~/.graph-memory/summaries.json`. They
+  are never stored as notes and never recalled into a session.
+- **Marked when out of date.** A summary remembers the notes it was written from. When
+  notes in the scope are added, removed, reworded or disputed, the page says how many
+  changed and offers Refresh; nothing is rewritten on its own.
 
 ## Moving from the conversation graph
 
@@ -327,7 +348,7 @@ with simulated time, so weeks of use run in seconds:
   SessionStart(compact), fires SessionEnd. Advancing the clock runs the daemon's
   maintenance: idle graduation, abandoned sessions and dormancy.
 - The **model** is an oracle by default (`sim/oracle.py`): it reads the real extraction,
-  merge and judge prompts and answers from the scenario's facts (a turn can say which
+  merge, judge and summary prompts and answers from the scenario's facts (a turn can say which
   recalled facts its reply contradicts, and which pages it read). `--model haiku` uses the real
   model. The **embedder** is a hashed bag of words by default, or the real one with
   `--embedder real`.
@@ -337,7 +358,7 @@ reinforcement, use and co-use edges, decay and revival, open items (closed by a 
 session or by hand, and recalled by "where were we?"), the buffer's lifecycle, a slow
 session of questions (what was learned and where from, one rolling summary), knowledge
 going stale (disputed, superseded, retracted), deleting with bridges and undo, topic
-scopes, project isolation, entity names, crashes and restarts, model failures, noise, and a generated
+scopes, a project's summary (cited, out of date after a change), project isolation, entity names, crashes and restarts, model failures, noise, and a generated
 scale test (5 projects, 180 items).
 
 ```sh

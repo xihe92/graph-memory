@@ -58,6 +58,7 @@ from .knowledge import (
     KNOWLEDGE_FILE,
     TOPIC_PREFIX,
     VECTORS_FILE,
+    Item,
     KnowledgeStore,
     Segment,
     at_risk,
@@ -86,6 +87,9 @@ FOLDED = "folded"  # a session's summaries folded into one, its knowledge untouc
 RESCOPE = "rescope"  # the model proposes where each item is recalled; a person applies it
 RESCOPE_JOB = "memory:rescope"  # the queue's name for that job (it is no session)
 RESCOPE_FILE = "rescope.json"
+SUMMARIZE = "summarize"  # the model writes a brief of one scope's items for a person
+SUMMARIZE_JOB = "memory:summarize:"  # + the scope: the queue's name for that job
+SUMMARY_FILE = "summaries.json"  # the briefs, by scope; a cache, not knowledge
 
 
 def _rebuild_diff(
@@ -182,6 +186,7 @@ class _Job:
     transcript: str | None = None  # a rebuild reads the session's turns from here
     preview: bool = False  # a rebuild on a copy of memory, to look at before applying
     force: bool = False  # a long rebuild changes memory directly, without a preview first
+    scope: str = ""  # a summary's scope
 
 
 class Daemon:
@@ -209,6 +214,7 @@ class Daemon:
         # merges see each other's results
         self.grad_queue: asyncio.Queue[_Job] = asyncio.Queue()
         self._grad_queued: Counter[str] = Counter()  # session -> graduations waiting
+        self._summary_errors: dict[str, str] = {}  # scope -> why its last brief failed
         self._graduating: str | None = None
         self._failures: Counter[str] = Counter()  # session -> failed graduations in a row
         self.knowledge_dirty = False
@@ -510,6 +516,10 @@ class Daemon:
             return self.apply_rescope()
         if method == "knowledge_scope":
             return self.knowledge_scope([str(i) for i in p.get("ids") or []], str(p["to"]))
+        if method == "knowledge_summarize":
+            return self.knowledge_summarize(str(p.get("scope") or ""), bool(p.get("force")))
+        if method == "knowledge_summary":
+            return self.knowledge_summary(str(p.get("scope") or ""))
         if method == "shutdown":
             self.stop()  # this answer still goes out: serve() waits for it
             return None
@@ -801,6 +811,9 @@ class Daemon:
             return
         if job.trigger == RESCOPE:
             await self._rescope(job)
+            return
+        if job.trigger == SUMMARIZE:
+            await self._brief(job)
             return
         session = job.session
         pending = self.buffer.exchanges(session)
@@ -1567,6 +1580,18 @@ class Daemon:
         ids = list(dict.fromkeys(self._item_ref(r) for r in refs))
         if not ids:
             raise KeyError("no items to scope")
+        scope = self._scope_ref(to)
+        for i in ids:
+            k.items[i].scope = scope
+        k.save()
+        self.knowledge_dirty = False
+        self.events.emit("knowledge_scope", items=ids, scope=scope)
+        return {"ids": ids, "scope": scope}
+
+    def _scope_ref(self, to: str) -> str:
+        """The scope key a person means: "global", "topic:<name>" (in the spelling memory
+        has), or a project by its name or key."""
+        k = self.knowledge
         want = to.strip()
         scope: str | None
         if want.lower() == "global":
@@ -1585,12 +1610,112 @@ class Daemon:
             raise ValueError(
                 f"unknown scope {to!r}: use global, topic:<name>, or a project memory knows"
             )
-        for i in ids:
-            k.items[i].scope = scope
-        k.save()
-        self.knowledge_dirty = False
-        self.events.emit("knowledge_scope", items=ids, scope=scope)
-        return {"ids": ids, "scope": scope}
+        return scope
+
+    # ------------------------------------------------------------------ summaries
+
+    def _scope_items(self, scope: str) -> list[Item]:
+        return [i for i in self.knowledge.valid_items() if i.scope == scope]
+
+    def _scope_label(self, scope: str) -> tuple[str, str]:
+        """(short name, how the prompt and the page call it)."""
+        if scope == "global":
+            return "global", "the user themself and how they like to work (global notes)"
+        name = topic_of(scope)
+        if name:
+            return name, f"the topic {name}"
+        names = {
+            x["key"]: x["name"] for x in scope_names(i.scope for i in self.knowledge.items.values())
+        }
+        title = names.get(scope, scope.rsplit("/", 1)[-1])
+        return title, f"the project {title}"
+
+    def _summaries(self) -> dict[str, Any]:
+        path = self.cfg.home / SUMMARY_FILE
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def knowledge_summarize(self, to: str, force: bool = False) -> dict[str, Any]:
+        """Queue a brief of one scope's valid items (see summarize.py). Nothing is queued
+        when the scope's brief is current, unless `force`, or when one is being written."""
+        from .summarize import changed_since
+
+        scope = self._scope_ref(to)
+        items = self._scope_items(scope)
+        if not items:
+            raise KeyError(f"memory has no notes in {to!r} to summarize")
+        if self.ask is None:
+            raise GraduationError("no model to ask")
+        job = SUMMARIZE_JOB + scope
+        if self._grad_queued.get(job):
+            return {"scope": scope, "queued": False, "running": True, "items": len(items)}
+        have = self._summaries().get(scope)
+        if have and not force and changed_since(have.get("notes") or {}, items) == 0:
+            return {"scope": scope, "queued": False, "running": False, "items": len(items)}
+        self._summary_errors.pop(scope, None)
+        self._grad_queued[job] += 1
+        self.grad_queue.put_nowait(_Job(job, SUMMARIZE, scope=scope))
+        return {"scope": scope, "queued": True, "running": True, "items": len(items)}
+
+    async def _brief(self, job: _Job) -> None:
+        from .summarize import select, stamp, summarize
+
+        scope = job.scope
+        started = time.perf_counter()
+        assert self.ask is not None
+        items, left_out = select(self._scope_items(scope))
+        name, label = self._scope_label(scope)
+        try:
+            if not items:
+                raise KeyError("no notes left in this scope")
+            brief = await asyncio.to_thread(summarize, label, items, self.ask)
+        except Exception as exc:
+            log.warning("summarizing %s failed: %s", scope, exc)
+            self._summary_errors[scope] = f"{type(exc).__name__}: {exc}"[:300]
+            self.events.emit(SUMMARIZE, ok=False, scope=scope, error=self._summary_errors[scope])
+            return
+        brief.update(
+            scope=scope,
+            name=name,
+            at=clock.now().isoformat(),
+            items=len(items),
+            left_out=left_out,
+            notes={i.item_id: stamp(i) for i in items},
+        )
+        valid = {i.scope for i in self.knowledge.valid_items()}
+        kept = {k: v for k, v in self._summaries().items() if k in valid}  # drop empty scopes
+        kept[scope] = brief
+        atomic_write(self.cfg.home / SUMMARY_FILE, json.dumps(kept, indent=1))
+        self.events.emit(
+            SUMMARIZE,
+            ok=True,
+            scope=scope,
+            items=len(items),
+            left_out=left_out,
+            points=sum(len(s["points"]) for s in brief["sections"]),
+            ms=round((time.perf_counter() - started) * 1000, 1),
+        )
+
+    def knowledge_summary(self, to: str) -> dict[str, Any]:
+        """The cached brief of a scope, how many notes changed since it was written, and
+        whether one is being written now."""
+        from .summarize import changed_since
+
+        scope = self._scope_ref(to)
+        items = self._scope_items(scope)
+        have = self._summaries().get(scope)
+        return {
+            "scope": scope,
+            "name": self._scope_label(scope)[0],
+            "items": len(items),
+            "running": bool(self._grad_queued.get(SUMMARIZE_JOB + scope)),
+            "error": self._summary_errors.get(scope),
+            "summary": have,
+            "changed": changed_since(have.get("notes") or {}, items) if have else 0,
+        }
 
     def knowledge_confirm(self, ref: str) -> dict[str, Any]:
         """A person checked the item and it still holds."""

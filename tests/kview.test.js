@@ -83,6 +83,18 @@ v = K.view(data, K.defaults());
 assert.deepEqual(K.selectable(v, K.defaults(), new Set(["terse"]), null), ["terse"]);
 assert.equal(K.selectable(v, K.defaults(), null, null).length, v.items.length);
 
+// a summary: citations are numbered in reading order, one number per note, and a note
+// that is no longer true or was deleted since is marked
+const b = K.brief({ sections: [
+  { title: "Decisions and why", points: [{ text: "Lua replaced the lock.", notes: ["lua", "lock"] }] },
+  { title: "Open items", points: [{ text: "Be terse.", notes: ["terse", "lua", "zapped"] }] },
+] }, data.items);
+assert.equal(b.cited, 4);
+assert.deepEqual(b.sections[0].points[0].cites.map((c) => [c.n, c.state]), [[1, "ok"], [2, "gone"]]);
+assert.deepEqual(b.sections[1].points[0].cites.map((c) => [c.id, c.n, c.state]),
+  [["terse", 3, "ok"], ["lua", 1, "ok"], ["zapped", 4, "deleted"]]);
+assert.deepEqual(K.brief({}, []), { sections: [], cited: 0 });
+
 // stored filters are cleaned; toggling adds and removes
 assert.deepEqual(K.clean({ status: ["gone", "bogus"], area: "old", scope: "" }),
   { status: ["gone"], area: [], scope: "all", withGlobal: true });

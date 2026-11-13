@@ -227,6 +227,8 @@ def _knowledge(cfg: Config, args: argparse.Namespace) -> int:
         return _rescope(cfg, args)
     if args.action == "scope":
         return _scope(cfg, args)
+    if args.action == "summarize":
+        return _summarize(cfg, args)
     if args.action in ("show", "retract", "restore", "confirm", "delete", "undelete"):
         if not args.id:
             what = "a batch id" if args.action == "undelete" else "an id"
@@ -429,6 +431,55 @@ def _rescope(cfg: Config, args: argparse.Namespace) -> int:
     return _show_rescope(cfg)
 
 
+def _summarize(cfg: Config, args: argparse.Namespace) -> int:
+    """Print the brief of one project or topic; the model writes it again when notes
+    changed since the last one (or with --force)."""
+    scope = " ".join(args.id).strip()
+    if not scope:
+        print(
+            "knowledge summarize needs a scope: global, topic:<name>, or a project's name",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        res = call(cfg, "knowledge_summarize", {"scope": scope, "force": args.force})
+        if res["running"]:
+            print(f"the model is reading {res['items']} notes…", file=sys.stderr)
+            deadline = time.monotonic() + 900
+            while call(cfg, "knowledge_summary", {"scope": scope})["running"]:
+                if time.monotonic() > deadline:
+                    print("still running after 15 minutes", file=sys.stderr)
+                    return 1
+                time.sleep(1)
+        got = call(cfg, "knowledge_summary", {"scope": scope})
+    except RemoteError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    if not got["summary"] or (res["running"] and got["error"]):
+        print(f"failed: {got['error'] or 'no summary was written'}", file=sys.stderr)
+        return 1
+    s = got["summary"]
+    kind = (
+        "global"
+        if s["scope"] == "global"
+        else "topic"
+        if s["scope"].startswith("topic:")
+        else "project"
+    )
+    head = "global notes" if kind == "global" else f"{kind} {s['name']}"
+    left = f", {s['left_out']} left out" if s["left_out"] else ""
+    notes = f"{s['items']} note{'' if s['items'] == 1 else 's'}{left}"
+    print(f"Summary of {head}: {notes}, written {s['at'][:16].replace('T', ' ')}")
+    if s["overview"]:
+        print(f"\n{s['overview']}")
+    for sec in s["sections"]:
+        print(f"\n{sec['title'].upper()}")
+        for pt in sec["points"]:
+            print(f"- {pt['text']} [{', '.join(n[:8] for n in pt['notes'])}]")
+    print("\nthe ids in brackets are the notes behind each point: gm knowledge show <id>")
+    return 0
+
+
 def _show_rescope(cfg: Config) -> int:
     plan = call(cfg, "rescope_preview", {})
     names = {x["key"]: x["name"] for x in plan["scopes"]}
@@ -544,6 +595,7 @@ def main(argv: list[str] | None = None) -> int:
             "resummarize",
             "rescope",
             "scope",
+            "summarize",
         ],
         default="list",
         help="retract: mark an item no longer true; restore: undo that; confirm: it still "
@@ -552,10 +604,14 @@ def main(argv: list[str] | None = None) -> int:
         "regraduate: a whole session again from its transcript, under the current rules; "
         "resummarize: fold a session's summaries into one, knowledge untouched; "
         "rescope: the model proposes where each item is recalled (--apply keeps it); "
-        "scope: set items' scope by hand (--to)",
+        "scope: set items' scope by hand (--to); "
+        "summarize: a brief of what memory knows about one project or topic",
     )
     kp.add_argument(
-        "id", nargs="*", help="item or entity id (prefix); several for delete; a batch for undelete"
+        "id",
+        nargs="*",
+        help="item or entity id (prefix); several for delete; a batch for undelete; "
+        "summarize: global, topic:<name>, or a project's name",
     )
     kp.add_argument("--all", action="store_true", help="include items no longer true")
     kp.add_argument("--reason", default="", help="why (retract, delete)")
@@ -571,7 +627,8 @@ def main(argv: list[str] | None = None) -> int:
     kp.add_argument(
         "--force",
         action="store_true",
-        help="regraduate: change memory directly even for a long session (no preview first)",
+        help="regraduate: change memory directly even for a long session (no preview first); "
+        "summarize: write it again even when no note changed",
     )
     sp = sub.add_parser("stats", help="health and quality numbers from the event log")
     sp.add_argument("--since", default="7d", help="window: 30m, 24h, 7d, 2w or all")

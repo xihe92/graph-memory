@@ -34,9 +34,12 @@ def kind_of(prompt: str) -> str:
         return "extract"
     if "You judge memory notes" in prompt:
         return "judge"
+    if "You summarize one part of a long-term memory" in prompt:
+        return "summary"
     return "merge"
 
 
+_NOTE = re.compile(r"^(K\d+) \[(\w+)[^\]]*\] (.*)$", re.M)  # a note in a summary prompt
 _Q = re.compile(r"^Q(\d+): (.*?) \((\w+)\): .*? — (.*)$", re.M)
 
 
@@ -108,6 +111,8 @@ class OracleModel:
                 raise RuntimeError("oracle: injected merge failure")
             if kind == "judge":
                 return json.dumps(self.judge(prompt))
+            if kind == "summary":
+                return json.dumps(self.summary(prompt))
             out = self.extract(prompt) if kind == "extract" else self.merge(prompt)
             return json.dumps(out)
         finally:
@@ -175,6 +180,29 @@ class OracleModel:
             earlier = prompt.split("<earlier>", 1)[1].split("</earlier>", 1)[0].strip()
             return f"{earlier} Then: {heads}"
         return f"Covered: {heads}"
+
+    # ------------------------------------------------------------------ summary
+
+    @staticmethod
+    def summary(prompt: str) -> dict[str, Any]:
+        """A brief a test can trace: one point per note, in the section of its type,
+        citing that note."""
+        section = {
+            "decision": "decisions",
+            "preference": "preferences",
+            "pitfall": "pitfalls",
+            "open": "open",
+        }
+        out: dict[str, Any] = {
+            k: [] for k in ("decisions", "how", "preferences", "pitfalls", "open")
+        }
+        notes = _NOTE.findall(prompt.split("Notes (id,", 1)[1])
+        for ref, kind, text in notes:
+            point = {"text": _strip_why(text), "notes": [ref]}
+            out[section.get(kind, "how")].append(point)
+        out["overview"] = f"Covers {len(notes)} notes."
+        out["standing"] = [{"text": "nothing cites this point", "notes": []}]
+        return out
 
     # ------------------------------------------------------------------ judge
 

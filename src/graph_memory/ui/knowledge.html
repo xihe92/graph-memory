@@ -98,6 +98,20 @@
   .sidebar-head span { color: var(--muted); font-size: 12px; flex: 1; }
   .pickbar { position: sticky; bottom: 0; z-index: 2; background: var(--panel-solid); padding: 10px 14px;
     border-top: 1px solid var(--line-strong); display: flex; flex-direction: column; gap: 8px; }
+  #detail { z-index: 3; }
+  #brief { top: var(--top); left: 350px; bottom: 14px; width: min(620px, calc(100% - 812px));
+    min-width: 320px; overflow: auto; display: none; z-index: 2; }
+  #brief.open { display: block; }
+  #brief .dh p { font-size: 16px; font-weight: 600; }
+  #brief .meta { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  #brief .ds p { font-size: 13.5px; line-height: 1.55; }
+  #brief ul { margin: 0; padding-left: 18px; }
+  #brief li { margin-bottom: 7px; font-size: 13.5px; line-height: 1.5; }
+  .cite { font: 600 10.5px/1 var(--mono); padding: 2px 5px; margin-left: 3px; border-radius: 5px; cursor: pointer;
+    background: rgba(255,224,102,.12); border: 1px solid rgba(255,224,102,.35); color: var(--accent); vertical-align: 1px; }
+  .cite:hover { background: rgba(255,224,102,.28); }
+  .cite.gone { color: var(--bad); border-color: rgba(255,69,58,.5); background: rgba(255,69,58,.1); text-decoration: line-through; }
+  .cite.deleted { color: var(--faint); border-color: var(--line-strong); background: none; text-decoration: line-through; cursor: default; }
   #toast { position: fixed; left: 50%; bottom: 24px; transform: translate(-50%, 140%); padding: 9px 14px;
     display: flex; gap: 12px; align-items: center; transition: transform .2s ease; z-index: 5; }
   #toast.show { transform: translate(-50%, 0); }
@@ -118,6 +132,7 @@
   @media (max-width: 900px) {
     #side { width: auto; right: 14px; bottom: auto; max-height: 34vh; }
     #detail { width: auto; left: 14px; top: auto; height: 55vh; transform: translateY(110%); }
+    #brief { left: 14px; right: 14px; width: auto; }
     #legend { display: none; }
   }
 </style>
@@ -138,6 +153,7 @@
 <aside id="side" class="panel"></aside>
 <section id="detail" class="panel" aria-live="polite"></section>
 <footer id="legend" class="panel"></footer>
+<section id="brief" class="panel" aria-live="polite" aria-label="Summary"></section>
 <div id="toast" class="panel" role="status"></div>
 
 <script src="/vendor/3d-force-graph.min.js"></script>
@@ -168,7 +184,8 @@ function loadFilters() {
 }
 function saveFilters() { try { localStorage.setItem(FKEY, JSON.stringify(S.f)); } catch (e) { /* private window */ } }
 const S = { data: null, showEnt: true, f: loadFilters(), v: null, on: null, litEnt: new Set(), match: null, selected: null, fitted: false,
-  picking: false, picked: new Set(), deleted: [] };
+  picking: false, picked: new Set(), deleted: [],
+  brief: { open: false, scope: null, data: null, timer: null } };
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
@@ -281,7 +298,8 @@ function renderFilters() {
       ${scopeOptions(scopes.filter((x) => x.key === "global"), "", f)}
       ${scopeOptions(scopes.filter((x) => x.key !== "global" && !x.topic), "projects", f)}
       ${scopeOptions(scopes.filter((x) => x.topic), "topics", f)}
-    </select>${isProject ? `<label class="tg"><input type="checkbox" id="withGlobal" ${f.withGlobal ? "checked" : ""}> + global</label>` : ""}</div>
+    </select>${isProject ? `<label class="tg"><input type="checkbox" id="withGlobal" ${f.withGlobal ? "checked" : ""}> + global</label>` : ""}
+      ${f.scope !== "all" ? `<button class="btn" data-act="brief-open" title="A short brief of what memory knows here, written by the model">Summarize</button>` : ""}</div>
     ${KView.active(f) ? `<button class="linkbtn" data-f="clear">clear</button>` : ""}`;
   fitTop();
 }
@@ -367,6 +385,70 @@ function renderSideBody() {
     ${by[t].sort((a, b) => b.strength - a.strength || b.created_at.localeCompare(a.created_at)).map(itemRow).join("")}
   </div>`).join("");
 }
+// ---- the summary of one scope: a brief the model writes from that scope's notes
+function scopeKind(key) {
+  if (key === "global") return "Global notes";
+  const x = (S.data.scopes || []).find((s) => s.key === key);
+  return (x && x.topic ? "Topic " : "Project ") + scopeName(key);
+}
+async function openBrief() {
+  const b = S.brief;
+  clearTimeout(b.timer);
+  b.open = true; b.scope = S.f.scope; b.data = null;
+  renderBrief();
+  await loadBrief(true);
+}
+function closeBrief() {
+  clearTimeout(S.brief.timer);
+  S.brief.open = false; $("brief").classList.remove("open");
+}
+// start: write one when there is none yet (the first time a scope is opened)
+async function loadBrief(start = false) {
+  const b = S.brief, scope = b.scope;
+  let d;
+  try { d = await api(`/api/ksummary?scope=${encodeURIComponent(scope)}${start ? "" : "&poll=1"}`); }
+  catch (e) { d = { name: scopeName(scope), items: 0, error: e.message }; }
+  if (!b.open || b.scope !== scope) return;
+  b.data = d;
+  renderBrief();
+  if (start && !d.summary && !d.running && !d.error) return writeBrief(false);
+  clearTimeout(b.timer);
+  if (d.running) b.timer = setTimeout(loadBrief, 1500);
+}
+async function writeBrief(force) {
+  const b = S.brief;
+  try { await api("/api/ksummarize", { scope: b.scope, force }); }
+  catch (e) { b.data = { ...(b.data || {}), running: false, error: e.message }; return renderBrief(); }
+  await loadBrief();
+}
+function renderBrief() {
+  const b = S.brief, d = b.data;
+  let h = `<div class="dh"><button class="close" data-act="brief-close" aria-label="Close">×</button>
+    <div class="kind" style="color:var(--accent)">Summary</div><p>${esc(scopeKind(b.scope))}</p>`;
+  const s = d && d.summary;
+  if (s) h += `<div class="meta">From ${s.items} note${s.items === 1 ? "" : "s"}${s.left_out ? ` (${s.left_out} more left out: too many to read at once)` : ""} · written ${esc(when(s.at))}</div>`;
+  h += `</div>`;
+  if (!d) h += `<div class="empty">Loading…</div>`;
+  else if (d.running) h += `<div class="ds"><p>The model is reading ${d.items} note${d.items === 1 ? "" : "s"}… This takes up to a minute for a large project; you can keep using the page.</p></div>`;
+  else if (d.error) h += `<div class="ds stale"><h3>Could not write the summary</h3><p>${esc(d.error)}</p>
+    <div class="act" style="margin-top:8px"><button class="btn" data-act="brief-write">Try again</button></div></div>`;
+  else if (s && d.changed) h += `<div class="ds warn"><p>${d.changed} note${d.changed === 1 ? " has" : "s have"} changed since this summary was written.</p>
+    <div class="act" style="margin-top:8px"><button class="btn" data-act="brief-write">Refresh</button></div></div>`;
+  if (s) {
+    const v = KView.brief(s, S.data.items);
+    const cite = (c) => `<button class="cite ${c.state === "ok" ? "" : c.state}" ${c.state === "deleted" ? "disabled" : `data-id="${esc(c.id)}"`}
+      title="${esc(c.state === "deleted" ? "This note was deleted since" : (c.state === "gone" ? "No longer true: " : "") + c.statement)}">${c.n}</button>`;
+    if (s.overview) h += `<div class="ds"><p>${esc(s.overview)}</p></div>`;
+    h += v.sections.map((sec) => `<div class="ds"><h3>${esc(sec.title)}</h3><ul>${sec.points.map((p) =>
+      `<li>${esc(p.text)} ${p.cites.map(cite).join("")}</li>`).join("")}</ul></div>`).join("");
+    h += `<div class="ds"><p class="note">Each number is a note the point rests on: click it to open the note.
+      The summary is a view for you. It is not part of memory and is never recalled.</p>
+      ${d.running || d.changed || d.error ? "" : `<button class="linkbtn" data-act="brief-force" style="margin-top:6px">Write it again</button>`}</div>`;
+  }
+  $("brief").innerHTML = h;
+  $("brief").classList.add("open");
+}
+
 function renderLegend() {
   $("legend").innerHTML = Object.entries(TYPE).map(([k, c]) => `<span><i style="background:${c}"></i>${k}</span>`).join("") +
     `<span><i style="background:${ENTITY}"></i>entity</span>` +
@@ -496,6 +578,7 @@ async function reload() {
   S.data = await api("/api/knowledge");
   try { S.deleted = (await api("/api/kreview")).deleted; } catch (e) { S.deleted = []; }
   renderChips(); applyFilters();
+  if (S.brief.open) loadBrief();  // its notes may have changed
 }
 let toastTimer = null;
 function toast(html) {
@@ -524,7 +607,11 @@ function alertBox(msg) {
 document.addEventListener("click", (ev) => {
   const t = ev.target.closest("[data-id],[data-act],[data-f]");
   if (!t) return;
-  if (t.dataset.f === "clear") { S.f = KView.defaults(); return applyFilters(); }
+  if (t.dataset.f === "clear") { S.f = KView.defaults(); closeBrief(); return applyFilters(); }
+  if (t.dataset.act === "brief-open") return openBrief();
+  if (t.dataset.act === "brief-close") return closeBrief();
+  if (t.dataset.act === "brief-write") return writeBrief(false);
+  if (t.dataset.act === "brief-force") return writeBrief(true);
   if (t.dataset.f) { S.f[t.dataset.f] = KView.toggle(S.f[t.dataset.f], t.dataset.v); return applyFilters(); }
   if (t.dataset.act === "close") return clear();
   if (t.dataset.act === "retract-ask") {
@@ -563,7 +650,10 @@ document.addEventListener("click", (ev) => {
   renderSide();
 }, true);
 document.addEventListener("change", (ev) => {
-  if (ev.target.id === "scope") { S.f.scope = ev.target.value; applyFilters(); }
+  if (ev.target.id === "scope") {
+    S.f.scope = ev.target.value; applyFilters();
+    if (S.brief.open) (S.f.scope === "all" ? closeBrief() : openBrief());  // follow the scope
+  }
   if (ev.target.id === "withGlobal") { S.f.withGlobal = ev.target.checked; applyFilters(); }
 });
 $("showEnt").onchange = (e) => { S.showEnt = e.target.checked; G.graphData(graphData()); };
@@ -581,7 +671,7 @@ $("search").oninput = (e) => {
 };
 document.addEventListener("keydown", (e) => {
   if (e.key === "/" && document.activeElement !== $("search")) { e.preventDefault(); $("search").focus(); }
-  if (e.key === "Escape") clear();
+  if (e.key === "Escape") { if ($("detail").classList.contains("open") || !S.brief.open) clear(); else closeBrief(); }
   if (e.key === "Enter" && document.activeElement && document.activeElement.id === "reason") {
     if (document.querySelector('[data-act="delete-one"]')) remove([S.selected], $("reason").value);
     else act("retract", S.selected, $("reason").value);

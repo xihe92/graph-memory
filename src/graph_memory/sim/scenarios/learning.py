@@ -435,6 +435,138 @@ def stale_knowledge() -> Scenario:
     return s
 
 
+# --------------------------------------------------------------------------- summary
+
+
+def _summarized(project: str, has: list[str], lacks: list[str]) -> Check:
+    """Have the model write `project`'s summary, then read it back: every point cites a
+    note that is true and in that project; none cites `lacks`; with the oracle, which
+    writes one point per note, `has` are all cited."""
+
+    def check(sim: Simulator) -> str | None:
+        res = sim._call("knowledge_summarize", {"scope": project})
+        if not res["queued"]:
+            return f"not queued: {res}"
+        sim.settle()
+        got = sim._call("knowledge_summary", {"scope": project})
+        brief = got["summary"]
+        if got["error"] or not brief or got["changed"]:
+            return f"no current summary: {got['error']}, {got['changed']} changed"
+        cited = {n for sec in brief["sections"] for pt in sec["points"] for n in pt["notes"]}
+        if not cited:
+            return "the summary cites nothing"
+        scope = brief["scope"]
+        stray = [n for n in cited if n not in sim.store.items or not sim.store.items[n].valid]
+        stray += [n for n in cited if n in sim.store.items and sim.store.items[n].scope != scope]
+        if stray:
+            return f"cites notes that are not true or not in {project}: {stray}"
+        keys = {k for n in cited for k in sim.keys_of(sim.store.items[n].statement)}
+        bad = [k for k in lacks if k in keys]
+        if sim.oracle is not None:
+            bad += [f"missing {k}" for k in has if k not in keys]
+        return f"cited {sorted(keys)}: {bad}" if bad else None
+
+    return check
+
+
+def _summary_changed(project: str, at_least: int) -> Check:
+    def check(sim: Simulator) -> str | None:
+        got = sim._call("knowledge_summary", {"scope": project})
+        ok = got["summary"] is not None and got["changed"] >= at_least
+        return None if ok else f"{got['changed']} changed, want {at_least} or more"
+
+    return check
+
+
+def _item_count(n: int) -> Check:
+    def check(sim: Simulator) -> str | None:
+        got = len(sim.store.items)
+        return None if got == n else f"{got} items in memory, want {n}"
+
+    return check
+
+
+def summarize_scope() -> Scenario:
+    s = Scenario(
+        "summarize_scope",
+        "a person asks for a summary of one project: the model writes it from that "
+        "project's true notes only and every point cites one; it is a view, so memory "
+        "holds no more than before; a replaced note marks it out of date, and writing it "
+        "again leaves that note out",
+    )
+    s.oracle_only = True  # counts the items exactly; a real model may split one in two
+    api = s.project("api")
+    web = s.project("web")
+    s.fact(
+        "breaker",
+        "decision",
+        "the circuit breaker opens after five upstream failures within a minute",
+        about=["circuit breaker"],
+        why="a slow upstream took the whole api down",
+    )
+    s.fact(
+        "helper",
+        "fact",
+        "the retry helper wraps every upstream call",
+        about=["retry helper"],
+    )
+    s.fact(
+        "theme",
+        "preference",
+        "the web client uses the dark theme by default",
+        about=["web client"],
+    )
+    s.fact(
+        "breaker10",
+        "decision",
+        "the circuit breaker opens after ten upstream failures within a minute, not five",
+        about=["circuit breaker"],
+        why="five tripped on ordinary deploys",
+        match=["ten upstream"],
+        supersedes=["breaker"],
+    )
+    a = s.session("a", api)
+    a.turn(
+        "add a circuit breaker",
+        "The breaker opens after five failures a minute.",
+        learn=["breaker"],
+    )
+    a.turn("wrap upstream calls", "A retry helper now wraps every upstream call.", learn=["helper"])
+    a.end()
+    w = s.session("w", web)
+    w.turn("default theme?", "The web client now starts in the dark theme.", learn=["theme"])
+    w.end()
+    s.check_fn(
+        "the summary cites the project's own notes",
+        _summarized(api, has=["breaker", "helper"], lacks=["theme"]),
+    )
+    s.check_fn("a summary adds nothing to memory", _item_count(3))
+    s.advance(days=1)
+    b = s.session("b", api)
+    b.turn(
+        "the breaker trips on every deploy",
+        "Raised the threshold: the breaker now opens after ten upstream failures a minute.",
+        learn=["breaker10"],
+        allow=["breaker", "helper"],
+    )
+    b.end()
+    s.check("breaker", valid=False)
+    s.check_fn("the summary is marked out of date", _summary_changed(api, 2))
+    s.check_fn(
+        "written again, it leaves the replaced note out",
+        _summarized(api, has=["breaker10", "helper"], lacks=["breaker", "theme"]),
+    )
+    s.probe(
+        "when does the circuit breaker open?",
+        api,
+        has=["breaker10"],
+        lacks=["breaker", "theme"],
+        allow=["helper"],
+        label="recall never shows a summary, only notes",
+    )
+    return s
+
+
 # --------------------------------------------------------------------------- delete
 
 

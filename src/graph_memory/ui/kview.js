@@ -125,7 +125,26 @@
     return v.items.filter((i) => !on || on.has(i.id)).map((i) => i.id);
   }
 
-  const KView = { STATUS, AREAS, defaults, clean, active, needsReview, passes, view, litEntities, look, counts, toggle, selectable };
+  // A summary's sections with their citations numbered in reading order; a note keeps
+  // its number wherever it is cited. state: "ok", "gone" (no longer true) or "deleted".
+  function brief(summary, items) {
+    const byId = new Map(items.map((i) => [i.id, i]));
+    const num = new Map();
+    const sections = (summary.sections || []).map((s) => ({
+      title: s.title,
+      points: (s.points || []).map((p) => ({
+        text: p.text,
+        cites: (p.notes || []).map((id) => {
+          if (!num.has(id)) num.set(id, num.size + 1);
+          const it = byId.get(id);
+          return { id, n: num.get(id), statement: it ? it.statement : "", state: !it ? "deleted" : it.valid ? "ok" : "gone" };
+        }),
+      })),
+    }));
+    return { sections, cited: num.size };
+  }
+
+  const KView = { STATUS, AREAS, defaults, clean, active, needsReview, passes, view, litEntities, look, counts, toggle, selectable, brief };
   if (typeof module !== "undefined" && module.exports) module.exports = KView;
   else root.KView = KView;
 })(typeof globalThis !== "undefined" ? globalThis : this);

@@ -201,3 +201,41 @@ def test_real_merge_replaces_a_disputed_item(tmp_path: Path, embedder) -> None: 
     assert (
         "place" in said or "add column" in said or "without" in said
     ) and replacement.origin is Origin.DOCS, said
+
+
+@pytest.mark.skipif(shutil.which("claude") is None, reason="needs the claude CLI")
+def test_real_summary_cites_the_notes_it_was_given(tmp_path: Path) -> None:
+    """The real model writes a brief of a few notes: every point cites one of them, and
+    the open item lands among the open items."""
+    from graph_memory.summarize import select, summarize
+
+    k = KnowledgeStore(tmp_path)
+    notes = [
+        k.add_item(Item(type=kind, statement=text, why=why, scope="repo:/w/recipes"))
+        for kind, text, why in (
+            (
+                ItemType.DECISION,
+                "recipe_tag's primary key is (recipe_id, tag_id)",
+                "adding the same tag to a recipe twice becomes a no-op under INSERT OR IGNORE",
+            ),
+            (
+                ItemType.PITFALL,
+                "Without an index on recipe_tag.tag_id, deleting a tag scans the whole join table",
+                "",
+            ),
+            (
+                ItemType.OPEN,
+                "The import from the old JSON export has not been tested on real data",
+                "",
+            ),
+        )
+    ]
+    items, left_out = select(notes)
+    ask = claude_code_model("haiku", timeout=300).complete
+    brief = summarize("the project recipes", items, ask)
+    ids = {i.item_id for i in notes}
+    points = [(s["key"], p) for s in brief["sections"] for p in s["points"]]
+    assert left_out == 0 and brief["overview"] and points, brief
+    assert all(p["notes"] and set(p["notes"]) <= ids for _, p in points), brief
+    opened = [p for key, p in points if key == "open"]
+    assert any(notes[2].item_id in p["notes"] for p in opened), brief

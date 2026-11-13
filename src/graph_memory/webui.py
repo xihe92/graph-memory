@@ -176,6 +176,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._daemon("knowledge_item", {"id": q.get("id", "")})
         elif route == "kreview":
             self._daemon("knowledge_review")
+        elif route == "ksummary":
+            self._daemon("knowledge_summary", {"scope": q.get("scope", "")}, passive=poll)
         elif route == "stats":
             try:
                 since = parse_since(q.get("since", "7d"))
@@ -233,6 +235,10 @@ class _Handler(BaseHTTPRequestHandler):
             self._daemon("knowledge_delete", {"ids": body.get("ids"), "reason": body.get("reason")})
         elif route == "kundelete":
             self._daemon("knowledge_undelete", {"batch": body.get("batch")})
+        elif route == "ksummarize":
+            self._daemon(
+                "knowledge_summarize", {"scope": body.get("scope"), "force": body.get("force")}
+            )
         else:
             self._json(404, {"error": "unknown endpoint"})
 
