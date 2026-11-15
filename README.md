@@ -38,8 +38,9 @@ What is different about it:
 It needs Claude Code, Python 3.11 or later and [uv](https://docs.astral.sh/uv/). The
 model calls go through `claude -p` with your existing login.
 
-**[How it works](docs/how-it-works.md)** walks through remembering, recall, how memory
-ages and summaries, with diagrams and examples. The rest of this README is the reference.
+**[How it works](https://claude.ai/artifact/XrMqJVbNAjrivracZamnyz)** walks through
+remembering, recall, how memory ages, summaries and the Knowledge page, with diagrams and
+examples. The rest of this README is the reference.
 
 ```
 agent hook ──▶ gm (exits in ms) ──Unix socket──▶ daemon ──▶ ~/.graph-memory/
@@ -119,8 +120,8 @@ exchange that started the task.
 | `gm knowledge summarize <scope> [--force]` | Print a brief of what memory knows about one project or topic (`global`, `topic:<name>`, or a project's name). The model writes it when notes changed since the last one; `--force` writes it again anyway |
 | `gm stats [--since 24h\|7d\|all] [--json]` | Hook latency, graduations, the buffer, and **Memory help**: how often recall gave Claude notes and replies used them |
 | `gm ui [--no-open] [--port N]` | Open the web page (below); starts the daemon if needed |
-| `gm migrate [--dry-run]` | Move an older memory to the current format: off the conversation graph, then from JSON files into `memory.db` (once each; see below) |
-| `gm export [folder]` | Write memory out as JSON files, to read in any editor or to take back to an older version (the daemon can keep running) |
+| `gm migrate [--dry-run]` | Move a memory kept in JSON files into `memory.db` (see Where memory is kept) |
+| `gm export [folder]` | Write memory out as JSON files, to read in any editor (the daemon can keep running) |
 | `gm stop` | Stop the daemon (it also stops itself after 30 idle minutes) |
 
 ## The session buffer
@@ -381,34 +382,15 @@ vectors in a [sqlite-vec](https://github.com/asg017/sqlite-vec) table.
   0.3 s, a save after a reply takes well under a millisecond, and a recall about 8 ms.
   The file is about 40 MB.
 
-**From JSON files.** Memories made before SQLite are JSON files (`knowledge.json`,
-`knowledge_vectors.json`, `knowledge_deleted.jsonl`, `summaries.json`). They keep working
-as they are until you move them: `gm migrate --dry-run` shows what will move, and
-`gm migrate`, with the daemon stopped (`gm stop`):
+**JSON files.** On a Python that cannot load SQLite extensions, memory is kept in JSON
+files instead (`knowledge.json`, `knowledge_vectors.json`, `knowledge_deleted.jsonl`,
+`summaries.json`), searched in memory. `gm status` says so in `storage_note`. To move
+such a memory into `memory.db` once SQLite can be used: `gm stop`, then `gm migrate`
+(`--dry-run` shows what will move). It copies everything into a new database, compares
+the copy with the JSON files record by record and changes nothing on any difference,
+then packs the JSON files into `archive-<date>-json.tar.gz` and removes them.
 
-1. copies everything into `memory.db.new`;
-2. compares it with the JSON files, record by record, and checks that the nearest notes
-   to sampled notes are the same; on any difference it stops and changes nothing;
-3. packs the JSON files into `archive-<date>-json.tar.gz` and checks the archive opens;
-4. puts `memory.db` in place and removes the JSON files. The archive is yours to delete.
-
-`gm export` writes memory out in the JSON format again at any time.
-
-## Moving from the conversation graph
-
-Before the knowledge-only redesign every exchange was kept for good, in `nodes/`,
-`graph.json` and `chroma/`, and organised into topics with per-reply summaries and topic
-documents. `gm migrate --dry-run` shows what will happen; `gm migrate`, with the daemon
-stopped:
-
-1. moves exchanges that never graduated into the session buffer (they graduate when the
-   daemon next starts);
-2. rewrites `knowledge.json`: items get their sources from their graduation segments;
-3. packs the old files and `knowledge.json` as it was into `archive-<date>.tar.gz`, and
-   checks the archive opens;
-4. deletes the old files. The archive is yours to delete.
-
-It then moves the knowledge into `memory.db`, as above.
+`gm export [folder]` writes memory out as JSON files at any time.
 
 ## Simulation tests
 
@@ -476,10 +458,8 @@ ui_port = 7477                 # 0 turns the web page off
 remember_headless = false
 ```
 
-Settings from before the redesign still load: `summarizer`, `summarizer_model` and
-`summarizer_command` mean `model_backend`, `model` and `model_command`; placement, topic
-and summary settings are ignored; `embedder = "chroma-default"` means all-MiniLM-L6-v2.
-Thresholds are calibrated for all-MiniLM-L6-v2.
+Recall's thresholds are tuned for all-MiniLM-L6-v2; another embedder needs them tuned
+again.
 
 ## Development
 
