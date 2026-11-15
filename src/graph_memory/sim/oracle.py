@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..graduation import PROMPT_CHARS
+from ..redact import make_redactor
 from .scenario import Compact, Fact, Scenario, Turn
 
 _X = re.compile(r"^X(\d+) \(\d{4}-\d\d-\d\d\)$", re.M)
@@ -70,19 +71,23 @@ class OracleModel:
 
     def __post_init__(self) -> None:
         s = self.scenario
+        # the daemon redacts secrets before the model sees a turn and in what it answers:
+        # the oracle recognises turns, and notes, by the text after redaction
+        r = make_redactor()
         self.statements: dict[str, str] = {}  # wording -> fact key
         for f in s.facts.values():
             for text in [f.statement, *f.variants]:
                 self.statements[norm(text)] = f.key
+                self.statements[norm(r(text))] = f.key
         self.turns: list[tuple[str, tuple[tuple[str, str], ...]]] = []  # (marker, learn)
         self.summaries: list[tuple[str, tuple[tuple[str, str], ...]]] = []
         self.judged: dict[str, Turn] = {}  # prompt -> its turn, for judging
         seen: dict[str, tuple[tuple[str, str], ...]] = {}
         for st in s.steps:
             if isinstance(st, Turn):
-                self.judged[st.prompt[:3000].strip()] = st
+                self.judged[r(st.prompt)[:3000].strip()] = st
             if isinstance(st, Turn) and st.learn:
-                marker = f"USER: {st.prompt[:PROMPT_CHARS]}\nASSISTANT: {st.reply[:200]}"
+                marker = f"USER: {r(st.prompt)[:PROMPT_CHARS]}\nASSISTANT: {r(st.reply)[:200]}"
                 if marker in seen and seen[marker] != st.learn:
                     # the oracle recognises exchanges by their text: two identical
                     # exchanges teaching different facts would be credited to both
@@ -92,7 +97,7 @@ class OracleModel:
                 seen[marker] = st.learn
                 self.turns.append((marker, st.learn))
             elif isinstance(st, Compact) and st.learn:
-                self.summaries.append((st.summary[:300], st.learn))
+                self.summaries.append((r(st.summary)[:300], st.learn))
 
     # ------------------------------------------------------------------ entry point
 

@@ -71,6 +71,7 @@ from .knowledge_recall import KnowledgeIndex, note, tokens, used_by
 from .knowledge_recall import recall as knowledge_recall
 from .models import CommandModel, claude_code_model
 from .projects import project_of
+from .redact import make_redactor, redacting
 from .storage import json_note, sqlite_problem
 from .vectors import Embedder, atomic_write
 
@@ -209,8 +210,12 @@ class Daemon:
         self.events = events if events is not None else EventLog(events_path(cfg.home))
         self.knowledge = knowledge or KnowledgeStore(cfg.home, embedder)
         self.buffer = buffer or SessionBuffer(cfg.home)
-        self.ask = graduation_model
-        self.judge = judge_model if judge_model is not None else graduation_model
+        # secrets are replaced as text arrives, and in what models answer: see redact.py
+        self.redact = make_redactor(cfg.redact, cfg.redact_patterns)
+        self.ask = redacting(graduation_model, self.redact)
+        self.judge = redacting(
+            judge_model if judge_model is not None else graduation_model, self.redact
+        )
         self._rng = rng
         # graduations run one at a time, so the knowledge store has a single writer and
         # merges see each other's results
@@ -455,11 +460,12 @@ class Daemon:
             return self.status()
         if method == "recall":
             cwd = str(p["cwd"]) if p.get("cwd") else None
+            prompt = self.redact(str(p["prompt"]))
             self._seen(str(p["session"]), project_of([], cwd) if cwd else None)
-            self._asking[str(p["session"])] = (str(p["prompt"]), clock.now())
+            self._asking[str(p["session"])] = (prompt, clock.now())
             context: dict[str, Any] = {}
             if self.cfg.knowledge_recall in ("shadow", "on"):
-                lines = self.recall_knowledge(str(p["session"]), str(p["prompt"]), cwd)
+                lines = self.recall_knowledge(str(p["session"]), prompt, cwd)
                 if lines and self.cfg.knowledge_recall == "on":
                     context["knowledge"] = lines
             return {"context": context}
@@ -484,7 +490,7 @@ class Daemon:
                 "queued": self.enqueue_graduation(
                     str(p["session"]),
                     str(p.get("trigger") or "manual"),
-                    str(p.get("compact_summary") or ""),
+                    self.redact(str(p.get("compact_summary") or "")),
                 )
             }
         if method == "maintain":
@@ -555,10 +561,26 @@ class Daemon:
 
     # ------------------------------------------------------------------ remember
 
+    def _redacted(self, turn: Turn) -> Turn:
+        """The turn with secrets replaced in everything the daemon keeps or sends on."""
+        r = self.redact
+        return turn.model_copy(
+            update={
+                "prompt": r(turn.prompt),
+                "reply": r(turn.reply),
+                "commands": r.many(turn.commands),
+                "web": r.many(turn.web),
+                "subagents": [
+                    s.model_copy(update={"task": r(s.task), "result": r(s.result)})
+                    for s in turn.subagents
+                ],
+            }
+        )
+
     def remember(self, session: str, turn_data: dict[str, Any]) -> dict[str, Any]:
         """Store the finished exchange in the session's buffer, then check which recalled
         notes the reply used."""
-        turn = Turn.model_validate(turn_data)
+        turn = self._redacted(Turn.model_validate(turn_data))
         files = [*mentioned_files(turn.prompt), *turn.files]
         project = project_of(files, turn.cwd, use_cwd=False) or (
             project_of([], turn.cwd) if turn.cwd else None
@@ -1032,7 +1054,10 @@ class Daemon:
         session, started = job.session, time.perf_counter()
         if self.ask is None or job.transcript is None:
             return
-        turns = await asyncio.to_thread(read_turns, Path(job.transcript))
+        turns = [
+            (ts, self._redacted(t))
+            for ts, t in await asyncio.to_thread(read_turns, Path(job.transcript))
+        ]
         xs = self._rebuild_input(job, turns)
         todo = parts(xs)
         # a long session whose design moved on replays into many stale items: look first

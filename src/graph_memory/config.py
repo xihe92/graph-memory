@@ -12,6 +12,8 @@ Example config.toml:
     graduation_idle = 1200           # graduate a session after this many quiet seconds
     knowledge_recall = "on"          # "on", "shadow" (computed and logged only) or "off"
     judge_rate = 0.2                 # share of turns with notes whose notes a model judges
+    redact = true                    # keys, tokens and passwords out of memory (redact.py)
+    redact_patterns = []             # your own regular expressions to redact as well
 
 Settings from before the knowledge-only redesign are accepted: summarizer,
 summarizer_model and summarizer_command mean model_backend, model and model_command;
@@ -56,6 +58,10 @@ class Config:
     # after a reply, a model judges the notes shown for this share of turns that had notes
     judge_rate: float = 0.2
     events_days: float = 30.0  # the event log keeps this many days; 0 keeps everything
+    # secrets (keys, tokens, passwords) are replaced before anything stores or sends text;
+    # redact_patterns adds regular expressions of your own, see redact.py
+    redact: bool = True
+    redact_patterns: tuple[str, ...] = ()
     # sessions a program drives (`claude -p`, the Agent SDK): recall into them and
     # remember them like the user's own. Off: they are usually scripts and checks.
     remember_headless: bool = False
@@ -122,9 +128,13 @@ def load_config(home: str | Path | None = None) -> Config:
         data.pop(k)
     if ignored:
         log.info("ignoring retired settings in %s: %s", cfg_file, ignored)
-    if "model_command" in data:
-        data["model_command"] = tuple(data["model_command"])
+    for key in ("model_command", "redact_patterns"):
+        if key in data:
+            data[key] = tuple(data[key])
     cfg = _override(Config(home=root, socket_path=sock), data)
+    from .redact import make_redactor
+
+    make_redactor(cfg.redact, cfg.redact_patterns)  # a bad pattern fails here, loudly
     if os.environ.get("GM_UI_PORT"):
         cfg = replace(cfg, ui_port=int(os.environ["GM_UI_PORT"]))
     return cfg

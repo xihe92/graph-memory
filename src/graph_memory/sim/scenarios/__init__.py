@@ -26,5 +26,6 @@ SCENARIOS: dict[str, Callable[[], Scenario]] = {
     "crash_and_restart": robustness.crash_and_restart,
     "model_failures": robustness.model_failures,
     "noise": robustness.noise,
+    "secrets": robustness.secrets,
     "scale": scale.scale,
 }

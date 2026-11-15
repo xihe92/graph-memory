@@ -27,7 +27,8 @@ What is different about it:
 - **Scoped.** A note belongs to one project, to one topic such as SQLite (recalled in
   any project once the session is about it), or to you globally.
 - **Yours to inspect.** Everything stays on your machine, in one SQLite file
-  (`~/.graph-memory/memory.db`) that `gm export` writes out as JSON. A local web page
+  (`~/.graph-memory/memory.db`) that `gm export` writes out as JSON, with keys and
+  passwords [redacted](#secrets) before anything is kept. A local web page
   shows the graph, lets you correct or delete notes, and writes a **summary** of a
   project or topic in which every point links to the notes behind it.
 
@@ -392,6 +393,28 @@ then packs the JSON files into `archive-<date>-json.tar.gz` and removes them.
 
 `gm export [folder]` writes memory out as JSON files at any time.
 
+### Secrets
+
+Text is redacted as it reaches the daemon, before anything stores it, embeds it or sends
+it to a model. That covers the prompt at recall; the prompt, reply, commands and pages of
+each finished turn; a compaction summary; and the turns `gm knowledge regraduate` reads
+from a transcript. What a model answers is redacted too, so a note cannot carry a secret
+the model was shown. A match becomes `[redacted: <kind>]`:
+
+| Matched | Becomes |
+|---|---|
+| Keys with a known prefix: Anthropic, OpenAI, GitHub, AWS access key IDs, Google, Slack, Stripe | `export GITHUB_TOKEN=[redacted: github-token]` |
+| Private key blocks, JWTs | `[redacted: private-key]`, `[redacted: jwt]` |
+| Bearer tokens | `Authorization: Bearer [redacted: bearer-token]` |
+| A user and password in a URL | `postgres://[redacted: url-credentials]@db:5432/orders` |
+| `Password=` in a connection string | `Server=db;Password=[redacted: password];` |
+| A value given to a name such as `password`, `secret`, `api_key` or `token`, when it mixes letters and digits | `password=[redacted: secret]` |
+
+Code (`token = tokens(prompt)`, `api_key = os.environ["KEY"]`), hashes, ids and
+documented placeholders (`user:password@`, `<password>`, `{secret}`) are left alone. Not
+caught: a password written in plain words, or a key with no known shape; add patterns of
+your own with `redact_patterns`. Claude Code's own transcripts are not changed.
+
 ## Simulation tests
 
 `graph_memory.sim` replays scripted users against a real daemon through the real hooks,
@@ -456,6 +479,8 @@ events_days = 30               # the event log keeps this many days (0 keeps all
 idle_timeout = 1800            # the daemon stops after this long without requests
 ui_port = 7477                 # 0 turns the web page off
 remember_headless = false
+redact = true                  # replace keys, tokens and passwords before anything is kept
+redact_patterns = []           # regular expressions of your own to redact as well
 ```
 
 Recall's thresholds are tuned for all-MiniLM-L6-v2; another embedder needs them tuned

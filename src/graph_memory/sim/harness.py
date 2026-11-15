@@ -247,6 +247,7 @@ class Simulator:
         self.log = log or (lambda _msg: None)
         self.oracle: OracleModel | None = None
         self.model_calls: list[dict[str, Any]] = []
+        self.model_prompts: list[str] = []  # what the daemon sent the model, for checks
         if model == "oracle":
             self.oracle = OracleModel(scenario)
             self.ask: Callable[[str], str] = self.oracle
@@ -360,6 +361,7 @@ class Simulator:
     def _ask(self, prompt: str) -> str:
         started = time.perf_counter()
         kind = kind_of(prompt)
+        self.model_prompts.append(prompt)
         try:
             return self.ask(prompt)
         finally:

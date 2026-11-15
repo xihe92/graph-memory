@@ -153,17 +153,46 @@ def test_a_rebuild_of_an_ended_session_keeps_no_buffer(
 ) -> None:
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
     _transcript(tmp_path)
-    with daemon_with(cfg, Script([LOCK])) as d:
+    script = Script([LOCK])
+    with daemon_with(cfg, script) as d:
         # the last turn is still in progress (its prompt arrived, its reply didn't)
         call(cfg, "recall", {"session": f"claude-code:{SID}", "prompt": "still waiting question"})
         call(cfg, "regraduate", {"session": SID}, autostart=False)
         _wait(lambda: bool(_events(cfg, "graduate")))
         _wait(d.settled)
         assert len(d.knowledge.items) == 2 and d.buffer.sessions() == []
-        (extract,) = [p for p in d.ask.prompts if "distil" in p]  # type: ignore[union-attr]
+        (extract,) = [p for p in script.prompts if "distil" in p]
         assert "and retries?" in extract and "still waiting" not in extract
         with pytest.raises(RuntimeError, match="no transcript"):
             call(cfg, "regraduate", {"session": "zzzz"}, autostart=False)
+
+
+def test_a_rebuild_redacts_what_it_reads_from_the_transcript(
+    cfg: Config,  # noqa: F811
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The transcript is Claude Code's own file and keeps the key; a rebuild reads it
+    again, so what it sends the model and keeps must be redacted too."""
+    key = "gh" + "p_" + "K3" * 18
+    sid = "7a7a-3033-cccc"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    d = tmp_path / "projects" / "-w-limiter"
+    d.mkdir(parents=True)
+    entries = [
+        _e("u1", None, "user", f"push fails with token {key}", timestamp="2026-11-01T10:00:00Z"),
+        _reply("a1", "u1", f"The token {key} expired; use a fresh one.", "2026-11-01T10:01:00Z"),
+    ]
+    (d / f"{sid}.jsonl").write_text("\n".join(json.dumps(e) for e in entries) + "\n")
+    script = Script([LOCK])
+    with daemon_with(cfg, script) as daemon:
+        call(cfg, "regraduate", {"session": sid}, autostart=False)
+        _wait(lambda: bool(_events(cfg, "graduate")))
+        _wait(daemon.settled)
+    (extract,) = [p for p in script.prompts if "distil" in p]
+    assert "[redacted: github-token]" in extract
+    assert not any(key in p for p in script.prompts)
+    assert not any(key.encode() in f.read_bytes() for f in cfg.home.rglob("*") if f.is_file())
 
 
 def test_graduate_a_session_now_from_gm_and_the_page(

@@ -201,3 +201,68 @@ def _bounded_last_recall(sim: Simulator) -> str | None:
     if len(items) > 6 or chars > 2000:
         return f"{len(items)} items, {chars} chars"
     return None
+
+
+# Built at run time, so the repository holds no string shaped like a real key.
+_GITHUB = "gh" + "p_" + "Q4" * 18
+_AWS = "AK" + "IA" + "R5" * 8
+
+
+def secrets() -> Scenario:
+    s = Scenario(
+        "secrets",
+        "keys pasted into a session never reach memory: the session buffer, the event log "
+        "and the notes hold them only as [redacted: ...]; what the session taught still "
+        "graduates, and the model is never sent the key",
+    )
+    lim = limiter_facts(s)
+    s.entity("deploy.yml", "file", "the release workflow")
+    s.fact(
+        "ci_token",
+        "fact",
+        f"The release workflow pushes with the GitHub token {_GITHUB} kept in the deploy settings",
+        about=["deploy.yml"],
+        match=[r"github token", r"deploy settings"],
+    )
+    a = s.session("a", lim)
+    a.turn(
+        f"the release push fails: is the github token {_GITHUB} in the deploy settings wrong?",
+        "The GitHub token in the deploy settings had expired; deploy.yml now reads a fresh "
+        f"one. The AWS key {_AWS} for the artifact bucket is still valid.",
+        files=["deploy.yml"],
+        learn=["ci_token"],
+    )
+    s.check_fn("the session buffer and event log hold no key", _no_key_on_disk)
+    a.end()
+    s.check("ci_token", count=1, label="what the session taught still graduated")
+    s.check_fn("no key anywhere graph-memory writes", _no_key_on_disk)
+    s.check_fn("the note names the token only as redacted", _note_redacted)
+    s.check_fn("the model was never sent a key", _model_never_saw_key)
+    return s
+
+
+def _no_key_on_disk(sim: Simulator) -> str | None:
+    """Everything under the memory home except what stands in for Claude Code's own files
+    (its transcripts) and the simulated project."""
+    for f in sim.home.rglob("*"):
+        rel = f.relative_to(sim.home)
+        if not f.is_file() or rel.parts[0] in ("transcripts", "w", "scratch"):
+            continue
+        data = f.read_bytes()
+        if _GITHUB.encode() in data or _AWS.encode() in data:
+            return f"a key in {rel}"
+    return None
+
+
+def _note_redacted(sim: Simulator) -> str | None:
+    notes = [i.statement for i in sim.store.valid_items() if "deploy settings" in i.statement]
+    if not notes:
+        return "no note about the deploy settings"
+    if not all("[redacted: github-token]" in n for n in notes):
+        return f"not redacted: {notes}"
+    return None
+
+
+def _model_never_saw_key(sim: Simulator) -> str | None:
+    sent = [p for p in sim.model_prompts if _GITHUB in p or _AWS in p]
+    return f"{len(sent)} prompts carried a key" if sent else None
