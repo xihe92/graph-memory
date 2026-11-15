@@ -103,7 +103,8 @@ def test_vector_queries_are_exact_and_can_be_limited_to_a_set(tmp_path: Path) ->
     want = sorted(((cos(q, v), nid) for nid, v in vecs.items()), reverse=True)
     got = ix.query(q, 5)
     assert [nid for nid, _ in got] == [nid for _, nid in want[:5]]
-    assert all(abs(s - w) < 1e-9 for (_, s), (w, _) in zip(got, want, strict=False))
+    # vectors are kept as float32, the precision the embedder gives: scores to about 1e-7
+    assert all(abs(s - w) < 1e-6 for (_, s), (w, _) in zip(got, want, strict=False))
     items = ix.query(q, 50, where={"kind": "item"}, exclude=frozenset({"n1"}))
     assert len(items) == 24 and all(int(n[1:]) % 2 and n != "n1" for n, _ in items)
     assert [n for n, _ in ix.query(q, 5, among={"n3", "n4"})] == [

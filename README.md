@@ -1,21 +1,51 @@
 # graph-memory
 
-Long-term memory for coding agents, as a knowledge graph. While you work, each session's
-exchanges wait in a small buffer. When the session compacts, goes quiet or ends, they
-**graduate**: a cheap model distils the decisions, facts, preferences, pitfalls,
-procedures, open items and what you learned by asking into the knowledge graph, and the
-exchanges are deleted. When you send a prompt, **recall** shows the agent the few items
-that apply, each with its date and where it came from. Only the knowledge is kept for
-good.
+Long-term memory for Claude Code, kept as a knowledge graph on your own machine.
 
-**[How it works](docs/how-it-works.md)** walks through remembering, recall and how memory
-ages, with diagrams and real examples. This README is the reference.
+Claude Code starts every session knowing nothing about the last one. graph-memory records
+each session while you work, has a small model distil it into single notes (decisions,
+facts, preferences, pitfalls, procedures, open items, things you learned by asking), and
+shows Claude the few notes that apply before each reply.
+
+![The Knowledge page: a 3D graph of notes, the list of notes, and one note's detail](docs/img/knowledge.png)
+
+*The Knowledge page: notes coloured by type and the links between them, with one note
+open. The data is a demo: an invented recipe app.*
+
+What is different about it:
+
+- **Notes, not transcripts.** A session's exchanges wait in a small buffer. When the
+  session compacts, goes quiet or ends, they **graduate** into notes, each with its
+  reason, date and source, and the exchanges are deleted. Only the knowledge is kept.
+- **A graph, not only a search.** **Recall** finds notes by meaning and by words, then
+  follows the links between notes (Personalized PageRank), so the reason behind a
+  decision or the pitfall about a file comes along. It takes about 7 ms and calls no
+  model.
+- **Memory that ages.** Notes that are never used fade and stop being recalled. A
+  reversed decision is retired but kept for history. A note a reply contradicts is
+  marked disputed. Nothing is deleted unless you delete it, and that can be undone.
+- **Scoped.** A note belongs to one project, to one topic such as SQLite (recalled in
+  any project once the session is about it), or to you globally.
+- **Yours to inspect.** Everything stays on your machine, in one SQLite file
+  (`~/.graph-memory/memory.db`) that `gm export` writes out as JSON. A local web page
+  shows the graph, lets you correct or delete notes, and writes a **summary** of a
+  project or topic in which every point links to the notes behind it.
+
+![A project summary with numbered citations, and the note behind one of them](docs/img/summary.png)
+
+*A summary of one project. Each number opens the note the point rests on.*
+
+It needs Claude Code, Python 3.11 or later and [uv](https://docs.astral.sh/uv/). The
+model calls go through `claude -p` with your existing login.
+
+**[How it works](docs/how-it-works.md)** walks through remembering, recall, how memory
+ages and summaries, with diagrams and examples. The rest of this README is the reference.
 
 ```
 agent hook ──▶ gm (exits in ms) ──Unix socket──▶ daemon ──▶ ~/.graph-memory/
-                                                   │          knowledge.json          items, entities, edges   kept for good
-                                                   │          knowledge_vectors.json  one vector per item/entity
-                                                   │          knowledge_deleted.jsonl items deleted by hand, to undo
+                                                   │          memory.db               kept for good: items, entities, edges,
+                                                   │                                  their vectors, deletions to undo,
+                                                   │                                  summaries (a cache)
                                                    │          sessions/<session>/     exchanges until they graduate
                                                    │          events.jsonl            what happened, 30 days
                                                    └─ background: graduation, use checks, note judging
@@ -25,11 +55,19 @@ agent hook ──▶ gm (exits in ms) ──Unix socket──▶ daemon ──�
 
 ```sh
 git clone https://github.com/xihe92/graph-memory
-uv tool install --editable ./graph-memory   # puts `gm` on your PATH
+uv tool install --managed-python --editable ./graph-memory   # puts `gm` on your PATH
 ```
 
-The first daemon start downloads the embedding model (all-MiniLM-L6-v2, ~80 MB) to
-`~/.cache/chroma`. Graduation calls `claude -p --model haiku` with your existing login.
+`--managed-python` installs graph-memory on uv's own Python build. Memory is kept in
+SQLite and searched with the [sqlite-vec](https://github.com/asg017/sqlite-vec)
+extension, and Python's `sqlite3` module can load extensions there; some Python builds
+(pyenv's default, the macOS system Python) leave that out. On such a Python memory is
+kept in JSON files instead, and `gm status` says why.
+
+The first daemon start downloads the embedding model (all-MiniLM-L6-v2, about 90 MB,
+pinned and checked against its SHA-256) from Hugging Face to
+`~/.cache/graph-memory/models`. It then runs offline on the CPU. Graduation calls
+`claude -p --model haiku` with your existing login.
 
 ## Claude Code hooks
 
@@ -81,7 +119,8 @@ exchange that started the task.
 | `gm knowledge summarize <scope> [--force]` | Print a brief of what memory knows about one project or topic (`global`, `topic:<name>`, or a project's name). The model writes it when notes changed since the last one; `--force` writes it again anyway |
 | `gm stats [--since 24h\|7d\|all] [--json]` | Hook latency, graduations, the buffer, and **Memory help**: how often recall gave Claude notes and replies used them |
 | `gm ui [--no-open] [--port N]` | Open the web page (below); starts the daemon if needed |
-| `gm migrate [--dry-run]` | Move a memory from before the knowledge-only redesign (once; see below) |
+| `gm migrate [--dry-run]` | Move an older memory to the current format: off the conversation graph, then from JSON files into `memory.db` (once each; see below) |
+| `gm export [folder]` | Write memory out as JSON files, to read in any editor or to take back to an older version (the daemon can keep running) |
 | `gm stop` | Stop the daemon (it also stops itself after 30 idle minutes) |
 
 ## The session buffer
@@ -284,18 +323,27 @@ in the memory home, so an open page keeps working after the daemon restarts.
   summaries and exchanges; click one to read it, or forget an exchange recorded by
   mistake. Beside it, the sessions that graduated in the last three days and what they
   taught.
-- **Knowledge** (`/knowledge`): items coloured by type, entities, weighted edges; per item
-  its reason, validity, neighbours and the graduations it came from, with buttons to mark
-  it no longer true or true again. "Select to delete…" puts a checkbox on each listed item;
+- **Knowledge** (`/knowledge`): items coloured by type, entities, weighted edges, in 3D
+  or 2D (the toggle above the graph; 2D is lighter on a large memory). Search (`/`) finds
+  notes by their words. Per item: its reason, validity, neighbours and the graduations it
+  came from, with buttons to mark it no longer true or true again. "Select to delete…" puts a checkbox on each listed item;
   "Select all" ticks every item the list shows (with the "no longer true" filter: every
   item no longer true, not what replaced it). Filter chips by status, area and scope highlight the
   matching items and fade the rest. `/knowledge#<id>` opens one item. With a scope
   picked, **Summarize** opens a brief of that project or topic (see Summaries below).
+  The page asks the daemon only for what it draws; a note's full text is fetched when you
+  open it. Clicking a note flies the camera to it; closing the note (× or Escape) flies
+  back to where the camera was before. **Recenter**, beside the 3D/2D toggle, shows the
+  whole graph as the page first does (in 3D, from the same angle). Where each note sits and where you left the
+  camera are kept in the browser per view, so a reload opens the graph as you left it. With 1,000 notes or more the layout
+  is worked out in the background and the page stays usable meanwhile; each list group
+  shows its 60 strongest notes, with "Show more" for the rest.
 - **Memory help** (`/help`): per day, how many prompts got notes and how many replies
   used one, the model's verdicts on sampled turns, the most used notes, notes shown but
   never used, why prompts got no notes, and every prompt with its notes.
 
-The 3D library (3d-force-graph, MIT) is vendored, so the page works offline.
+The graph libraries (3d-force-graph for 3D, force-graph for 2D, both MIT) are vendored, so
+the page works offline.
 
 ### Summaries
 
@@ -310,11 +358,41 @@ and open items. Pick a scope on the Knowledge page and press **Summarize**, or r
   background queue and takes from a few seconds to about a minute for 200 notes.
 - **Every point cites its notes.** A point that cites no note it was given is dropped.
   On the page each citation is a number: click it to open the note.
-- **A view, not knowledge.** Summaries are kept in `~/.graph-memory/summaries.json`. They
-  are never stored as notes and never recalled into a session.
+- **A view, not knowledge.** Summaries are kept in `memory.db`, apart from the notes.
+  They are never stored as notes and never recalled into a session.
 - **Marked when out of date.** A summary remembers the notes it was written from. When
   notes in the scope are added, removed, reworded or disputed, the page says how many
   changed and offers Refresh; nothing is rewritten on its own.
+
+## Where memory is kept
+
+`~/.graph-memory/memory.db` is one SQLite file (in WAL mode): a table per kind of record
+(items, entities, edges, graduations), the deletions you can undo, the summaries, and the
+vectors in a [sqlite-vec](https://github.com/asg017/sqlite-vec) table.
+
+- **Only what changed is written.** The daemon notes which records a request changed and
+  writes those rows, with their vectors, in one transaction: a crash leaves the memory
+  as it was at the last save, never half of one.
+- **The vector search runs in SQLite.** Each vector row carries its note's scope and
+  whether it can be recalled now, so a recall's search for the 12 closest notes is
+  limited to the session's scopes inside the scan. Nothing about vectors is held in
+  Python's memory.
+- **At 10,000 notes** (a synthetic memory): the daemon starts reading it in about
+  0.3 s, a save after a reply takes well under a millisecond, and a recall about 8 ms.
+  The file is about 40 MB.
+
+**From JSON files.** Memories made before SQLite are JSON files (`knowledge.json`,
+`knowledge_vectors.json`, `knowledge_deleted.jsonl`, `summaries.json`). They keep working
+as they are until you move them: `gm migrate --dry-run` shows what will move, and
+`gm migrate`, with the daemon stopped (`gm stop`):
+
+1. copies everything into `memory.db.new`;
+2. compares it with the JSON files, record by record, and checks that the nearest notes
+   to sampled notes are the same; on any difference it stops and changes nothing;
+3. packs the JSON files into `archive-<date>-json.tar.gz` and checks the archive opens;
+4. puts `memory.db` in place and removes the JSON files. The archive is yours to delete.
+
+`gm export` writes memory out in the JSON format again at any time.
 
 ## Moving from the conversation graph
 
@@ -329,6 +407,8 @@ stopped:
 3. packs the old files and `knowledge.json` as it was into `archive-<date>.tar.gz`, and
    checks the archive opens;
 4. deletes the old files. The archive is yours to delete.
+
+It then moves the knowledge into `memory.db`, as above.
 
 ## Simulation tests
 
@@ -383,7 +463,7 @@ python -m graph_memory.sim --model haiku --embedder real --json out.json   # rea
 ```toml
 model_backend = "claude-code"  # the model graduation and judging use: or "command", "none"
 model = "haiku"
-embedder = "chroma-default"    # "none" disables similarity, or "package.module:factory"
+embedder = "all-MiniLM-L6-v2"  # "none" disables similarity, or "package.module:factory"
 knowledge_recall = "on"        # "shadow" logs without showing; "off"
 judge_rate = 0.2               # share of turns with notes that a model judges
 graduation_idle = 1200         # seconds of quiet before a session graduates
@@ -398,7 +478,8 @@ remember_headless = false
 
 Settings from before the redesign still load: `summarizer`, `summarizer_model` and
 `summarizer_command` mean `model_backend`, `model` and `model_command`; placement, topic
-and summary settings are ignored. Thresholds are calibrated for all-MiniLM-L6-v2.
+and summary settings are ignored; `embedder = "chroma-default"` means all-MiniLM-L6-v2.
+Thresholds are calibrated for all-MiniLM-L6-v2.
 
 ## Development
 
@@ -412,5 +493,6 @@ uv run mypy && uv run ruff check src tests
 ## License
 
 MIT, see [LICENSE](LICENSE). Parts are adapted from [Graphiti](https://github.com/getzep/graphiti)
-(Apache-2.0), and the 3D view bundles [3d-force-graph](https://github.com/vasturiano/3d-force-graph)
-(MIT); see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+(Apache-2.0), and the graph views bundle [3d-force-graph](https://github.com/vasturiano/3d-force-graph)
+and [force-graph](https://github.com/vasturiano/force-graph) (MIT); see
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

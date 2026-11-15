@@ -23,13 +23,13 @@ A person can also delete items outright (noise, never worth keeping). Neighbours
 were linked only through them get a weaker *bridge* edge, so recall still finds one from
 the other; each deletion is logged and can be undone.
 
-Stored in `<home>/knowledge.json`, vectors in `<home>/knowledge_vectors.json`, deletions
-in `<home>/knowledge_deleted.jsonl`.
+Stored in `<home>/memory.db` (SQLite, with the vectors searched in place), or in the JSON
+files from before it until `gm migrate` (see storage.py). The store keeps everything in
+memory and records what changed, so a save writes only the rows that did.
 """
 
 from __future__ import annotations
 
-import json
 import math
 import re
 import uuid
@@ -43,12 +43,13 @@ from typing import Any
 from pydantic import BaseModel, Field, field_validator
 
 from . import clock
-from .vectors import Embedder, JsonVectorIndex, atomic_write
-
-KNOWLEDGE_FILE = "knowledge.json"
-VECTORS_FILE = "knowledge_vectors.json"
-DELETED_FILE = "knowledge_deleted.jsonl"
-KNOWLEDGE_SCHEMA = 1
+from .storage import DB_FILE as DB_FILE  # the file names are imported from here elsewhere
+from .storage import DELETED_FILE as DELETED_FILE
+from .storage import KNOWLEDGE_FILE as KNOWLEDGE_FILE
+from .storage import SUMMARY_FILE as SUMMARY_FILE
+from .storage import VECTORS_FILE as VECTORS_FILE
+from .storage import Backend, open_backend
+from .vectors import Embedder
 
 
 class ItemType(StrEnum):
@@ -135,6 +136,7 @@ CO_OCCUR_WEIGHT = 0.25
 # days after it was last confirmed that an item is due for review; stable items never are
 REVIEW_DAYS = {Volatility.VERSIONED: 180.0, Volatility.VOLATILE: 30.0}
 DISPUTE_LIMIT = 2  # contradictions that retract an item
+JOURNAL_MAX = 20_000  # changes kept for the recall index; past it, it rebuilds
 BRIDGE_MAX = 6  # bridge edges added per group of deleted items
 BRIDGE_MIN = 0.05  # weaker bridges are not worth an edge
 # a chain of one of these through a deleted item still holds without it
@@ -394,33 +396,87 @@ def fuzzy_key(name: str) -> str:
 
 
 class KnowledgeStore:
-    def __init__(self, home: Path, embedder: Embedder | None = None) -> None:
+    def __init__(
+        self, home: Path, embedder: Embedder | None = None, backend: Backend | None = None
+    ) -> None:
         self.home = home
-        self.path = home / KNOWLEDGE_FILE
         self.embedder = embedder
-        self.vectors = JsonVectorIndex(home / VECTORS_FILE)
+        self.backend = backend or open_backend(home)
+        self.vectors = self.backend.vectors
         self.entities: dict[str, Entity] = {}
         self.items: dict[str, Item] = {}
         self.edges: dict[tuple[str, str, str], ItemEdge] = {}
         self.segments: dict[str, Segment] = {}
         self._by_name: dict[str, str] = {}  # normalized name or alias -> entity id
         self._shingle_cache: dict[str, set[str]] = {}
-        self.version = 0  # bumped on every change; recall rebuilds its index when it moves
+        self.version = 0  # bumped on every change
+        # What changed, for the recall index to update itself from (see touch()); a new
+        # epoch means "everything", after a bulk change such as a deletion
+        self.journal: list[tuple[str, ...]] = []
+        self.epoch = 0
+        self._due: set[str] = set()  # volatile items past their review, see sweep()
+        # what changed since the last save, by kind; an edge by (source, target, relation)
+        self._dirty: dict[str, set[Any]] = {k: set() for k in ("item", "entity", "edge", "segment")}
+        self._full_save = False  # a bulk change (delete, undelete): the next save writes all
+        self._vec_meta: set[str] = set()  # items whose scope or recallability to re-file
         self._load()
+        self._due = self._due_now()
+
+    # ------------------------------------------------------------------ change log
+
+    def touch(self, *item_ids: str) -> None:
+        """Record that these items changed in a way recall may see: validity, area,
+        review, scope, text or entities. Every change goes through a method of the store
+        that calls this; code outside the store that sets a field itself calls it too."""
+        self.version += 1
+        self.journal.extend(("item", i) for i in item_ids)
+        self._dirty["item"].update(item_ids)
+        self._vec_meta.update(item_ids)  # filed again before the next search or save
+        self._due.difference_update(item_ids)  # the next sweep looks at them afresh
+        self._trim_journal()
+
+    def _touch_pair(self, a: str, b: str) -> None:
+        self.version += 1
+        self.journal.append(("pair", a, b))
+        # every edge the two may share, either way: the save writes the ones that exist
+        # and removes the rest
+        for rel in Relation:
+            self._dirty["edge"].update({(a, b, rel.value), (b, a, rel.value)})
+        self._trim_journal()
+
+    def _touch_entity(self, entity_id: str) -> None:
+        self.version += 1
+        self.journal.append(("entity", entity_id))
+        self._dirty["entity"].add(entity_id)
+        self._trim_journal()
+
+    def changed_everything(self) -> None:
+        """A bulk change: readers of the journal start over, and the next save writes
+        everything."""
+        self.version += 1
+        self.epoch += 1
+        self.journal = []
+        self._full_save = True
+
+    def _trim_journal(self) -> None:
+        if len(self.journal) > JOURNAL_MAX:
+            self.changed_everything()
 
     # ------------------------------------------------------------------ persistence
 
     def _load(self) -> None:
-        if not self.path.exists():
-            return
-        data = json.loads(self.path.read_text(encoding="utf-8"))
+        data = self.backend.load()
         for e in data.get("entities", []):
             ent = Entity.model_validate(e)
             self.entities[ent.entity_id] = ent
             self._index_names(ent)
         for i in data.get("items", []):
             it = Item.model_validate(i)
-            self._promote(it)  # items reinforced before areas existed
+            # items reinforced before areas existed become old; a dormant item stays
+            # dormant (only being stated again or used revives it)
+            if it.area is Area.SURVIVOR and it.strength >= PROMOTE_AT:
+                it.area = Area.OLD
+                self._dirty["item"].add(it.item_id)
             self.items[it.item_id] = it
         for e in data.get("edges", []):
             edge = ItemEdge.model_validate(e)
@@ -433,17 +489,72 @@ class KnowledgeStore:
                 for sid in it.segments:
                     if sid in self.segments:
                         add_source(it, self.segments[sid].session, self.segments[sid].end)
+                        self._dirty["item"].add(it.item_id)
 
-    def save(self) -> None:
-        payload = {
-            "schema": KNOWLEDGE_SCHEMA,
-            "entities": [e.model_dump(mode="json") for e in self.entities.values()],
-            "items": [i.model_dump(mode="json") for i in self.items.values()],
-            "edges": [e.model_dump(mode="json") for e in self.edges.values()],
-            "segments": [s.model_dump(mode="json") for s in self.segments.values()],
+    def collections(self) -> dict[str, dict[Any, Any]]:
+        """Everything the backend stores, by kind."""
+        return {
+            "entity": self.entities,
+            "item": self.items,
+            "edge": self.edges,
+            "segment": self.segments,
         }
-        atomic_write(self.path, json.dumps(payload, indent=1))
-        self.vectors.save()
+
+    def changed(self, kind: str) -> set[Any]:
+        """The ids of one kind written or removed since the last save."""
+        return self._dirty[kind]
+
+    def vector_meta(self, kind: str, key: str) -> dict[str, str]:
+        """What is kept beside a vector: its kind, and for an item its scope and whether
+        it can be recalled now (a database searches by them)."""
+        it = self.items.get(key) if kind == "item" else None
+        if it is None:
+            return {"kind": kind}
+        return {"kind": kind, "scope": it.scope, "live": "1" if it.recallable else "0"}
+
+    def _file_vectors(self) -> None:
+        """Bring each changed item's vector row up to date with its scope and whether it
+        can be recalled (done late: a method marks an item before changing it)."""
+        if self._vec_meta:
+            items = self.items
+            self.vectors.set_meta(
+                {i: (items[i].scope, items[i].recallable) for i in self._vec_meta if i in items}
+            )
+            self._vec_meta.clear()
+
+    def save(self, full: bool = False) -> None:
+        """Write what changed since the last save (everything with `full`), with the
+        vectors, in one go."""
+        full = full or self._full_save
+        self._file_vectors()
+        self.backend.save(self, full)
+        for ids in self._dirty.values():
+            ids.clear()
+        self._full_save = False
+
+    def add_segment(self, segment: Segment) -> Segment:
+        self.version += 1
+        self.segments[segment.segment_id] = segment
+        self._dirty["segment"].add(segment.segment_id)
+        return segment
+
+    def summaries(self) -> dict[str, Any]:
+        """The cached summaries of projects and topics (see summarize.py)."""
+        return self.backend.summaries()
+
+    def set_summaries(self, data: dict[str, Any]) -> None:
+        """Replace the cached summaries; saved at once, with whatever else changed, so
+        what is on disk is always one consistent state."""
+        self.backend.set_summaries(data)
+        self.save()
+
+    def copy_to(self, dest: Path) -> None:
+        """Save, then put a copy of this memory in `dest` (for a preview to change)."""
+        self.save()
+        self.backend.copy_to(dest)
+
+    def close(self) -> None:
+        self.backend.close()
 
     # ------------------------------------------------------------------ vectors
 
@@ -461,7 +572,9 @@ class KnowledgeStore:
     def _index(self, key: str, text: str, kind: str, vector: list[float] | None = None) -> None:
         v = vector if vector is not None else self.embed(text)
         if v is not None:
-            self.vectors.upsert(key, v, {"kind": kind})
+            self.vectors.upsert(key, v, self.vector_meta(kind, key))
+            if kind == "item" and key not in self.items:
+                self._vec_meta.add(key)  # filed once the item is in
 
     def similar(
         self,
@@ -470,13 +583,18 @@ class KnowledgeStore:
         k: int,
         min_score: float,
         among: set[str] | None = None,
+        scopes: Sequence[str] | None = None,
     ) -> list[tuple[str, float]]:
-        """The nearest of a kind, among the given ids when a set is given."""
+        """The nearest of a kind, among the given ids when a set is given. `scopes` (with
+        `among` the visible items of those scopes) lets a database filter in the scan."""
         if vector is None:
             return []
+        self._file_vectors()
         return [
             (nid, s)
-            for nid, s in self.vectors.query(vector, k, where={"kind": kind}, among=among)
+            for nid, s in self.vectors.query(
+                vector, k, where={"kind": kind}, among=among, scopes=scopes
+            )
             if s >= min_score
         ]
 
@@ -489,6 +607,7 @@ class KnowledgeStore:
     def add_entity(self, e: Entity, vector: list[float] | None = None) -> Entity:
         self.version += 1
         self.entities[e.entity_id] = e
+        self._dirty["entity"].add(e.entity_id)
         self._index_names(e)
         self._index(e.entity_id, self.entity_text(e), "entity", vector)
         return e
@@ -497,9 +616,11 @@ class KnowledgeStore:
         self.version += 1
         e = self.entities[target_id]
         e.mentions += 1
+        self._dirty["entity"].add(target_id)
         if normalize_name(name) != normalize_name(e.name) and name not in e.aliases:
             e.aliases.append(name)
             self._index_names(e)
+            self._touch_entity(target_id)
         if summary and not e.summary:
             e.summary = summary
             self._index(e.entity_id, self.entity_text(e), "entity")
@@ -553,9 +674,9 @@ class KnowledgeStore:
     # ------------------------------------------------------------------ items
 
     def add_item(self, item: Item, vector: list[float] | None = None) -> Item:
-        self.version += 1
         self.items[item.item_id] = item
         self._index(item.item_id, self.item_text(item), "item", vector)
+        self.touch(item.item_id)
         return item
 
     def valid_items(self) -> Iterator[Item]:
@@ -592,7 +713,7 @@ class KnowledgeStore:
     ) -> Item:
         """A later graduation stated the item again: stronger (unless `boost` is off: the
         same evidence read twice), and one more source."""
-        self.version += 1
+        self.touch(item_id)
         it = self.items[item_id]
         if source is not None:
             add_source(it, source.session, source.until)
@@ -615,7 +736,7 @@ class KnowledgeStore:
     def confirm(self, item_id: str) -> Item:
         """A person (or a later session) confirms the item still holds: its review starts
         over and any dispute is cleared."""
-        self.version += 1
+        self.touch(item_id)
         it = self.items[item_id]
         self._confirm(it)
         return it
@@ -623,7 +744,7 @@ class KnowledgeStore:
     def dispute(self, item_id: str, reason: str = "") -> Item:
         """The live judge found the note contradicted by what the session saw. The first
         time it is shown with a warning; at DISPUTE_LIMIT it is retracted."""
-        self.version += 1
+        self.touch(item_id)
         it = self.items[item_id]
         if not it.valid:
             return it
@@ -643,7 +764,9 @@ class KnowledgeStore:
             it.area = Area.OLD
 
     def mark_recalled(self, item_ids: Iterable[str]) -> None:
+        self.version += 1  # nothing recall reads, but a page caching the item sees it
         for i in item_ids:
+            self._dirty["item"].add(i)
             if i in self.items:
                 self.items[i].recalls += 1
 
@@ -652,7 +775,7 @@ class KnowledgeStore:
         items used together get a co_used edge that grows each time)."""
         if not item_ids:
             return
-        self.version += 1
+        self.touch(*(i for i in item_ids if i in self.items))
         now = _now()
         for i in item_ids:
             it = self.items.get(i)
@@ -673,22 +796,35 @@ class KnowledgeStore:
                 else:
                     edge = self.edges[key]
                     edge.weight = round(min(1.0, edge.weight + CO_USE_STEP), 3)
+                    self._touch_pair(a, b)
 
     def sweep(self, now: datetime | None = None) -> list[str]:
-        """Move items whose vitality fell under the floor to dormant. Returns their ids."""
+        """Move items whose vitality fell under the floor to dormant. Returns their ids.
+        Volatile items that fell due for review (or were confirmed) since the last sweep
+        are logged too: they stop or start being recallable with no other change."""
         faded = []
         for it in self.valid_items():
             if it.area is not Area.DORMANT and it.vitality(now) < DORMANT_BELOW:
                 it.area = Area.DORMANT
                 faded.append(it.item_id)
-        if faded:
-            self.version += 1
+        due = self._due_now(now)
+        changed = [*faded, *(due ^ self._due)]
+        self._due = due
+        if changed:
+            self.touch(*changed)
         return faded
+
+    def _due_now(self, now: datetime | None = None) -> set[str]:
+        return {
+            i.item_id
+            for i in self.items.values()
+            if i.volatility is Volatility.VOLATILE and i.valid and i.overdue(now)
+        }
 
     def invalidate(self, old_id: str, new: Item, reason: str = "") -> None:
         """Graphiti's temporal invalidation: the old item stopped being true when the new
         one became true. It stays in the graph for history."""
-        self.version += 1
+        self.touch(old_id)
         old = self.items[old_id]
         if not old.valid:
             return
@@ -703,7 +839,7 @@ class KnowledgeStore:
         what replaced it, or the model missed the contradiction. Kept for history."""
         it = self.items[item_id]
         if it.valid:
-            self.version += 1
+            self.touch(item_id)
             it.invalid_at = it.expired_at = _now()
             it.invalidated_by = None
             it.invalid_reason = reason or "marked no longer true by hand"
@@ -714,11 +850,12 @@ class KnowledgeStore:
         supersedes edges pointing at it are dropped."""
         it = self.items[item_id]
         if not it.valid:
-            self.version += 1
+            self.touch(item_id)
             it.invalid_at = it.expired_at = it.invalidated_by = None
             it.invalid_reason = ""
             for key in [k for k in self.edges if k[1] == item_id and k[2] == "supersedes"]:
                 del self.edges[key]
+                self._dirty["edge"].add(key)
         return it
 
     # ------------------------------------------------------------------ edges
@@ -734,7 +871,7 @@ class KnowledgeStore:
     ) -> None:
         if source == target:
             return
-        self.version += 1
+        self._touch_pair(source, target)
         if relation is not Relation.SUPERSEDES:
             # undirected relations are stored once, in a canonical direction
             rev = self.edges.get((target, source, relation.value))
@@ -792,10 +929,6 @@ class KnowledgeStore:
 
     # ------------------------------------------------------------------ deleting
 
-    @property
-    def deleted_path(self) -> Path:
-        return self.home / DELETED_FILE
-
     def delete(self, item_ids: Iterable[str], reason: str = "") -> dict[str, Any]:
         """Remove items for good (a person's clean-up of noise). Their edges go with them;
         neighbours linked only through them get a bridge edge; entities no item names any
@@ -841,22 +974,13 @@ class KnowledgeStore:
         for b in bridges:
             self.edges[(b.source, b.target, b.relation.value)] = b
             batch["bridges"].append([b.source, b.target, b.relation.value])
-        self.version += 1
-        with self.deleted_path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(batch) + "\n")
+        self.changed_everything()
+        self.backend.log_deletion(batch)
         return batch
 
     def deleted(self) -> list[dict[str, Any]]:
         """Logged deletions, oldest first."""
-        if not self.deleted_path.exists():
-            return []
-        out = []
-        for line in self.deleted_path.read_text(encoding="utf-8").splitlines():
-            try:
-                out.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-        return out
+        return self.backend.deletions()
 
     def undelete(self, batch_id: str) -> dict[str, Any]:
         """Put a deleted batch back as it was: items, entities, edges; its bridges go."""
@@ -875,7 +999,7 @@ class KnowledgeStore:
             it = Item.model_validate(rec["item"])
             self.items[it.item_id] = it
             if rec.get("vector"):
-                self.vectors.upsert(it.item_id, rec["vector"], {"kind": "item"})
+                self.vectors.upsert(it.item_id, rec["vector"], self.vector_meta("item", it.item_id))
             else:
                 self._index(it.item_id, self.item_text(it), "item")
         for src, tgt, rel in batch["bridges"]:
@@ -889,9 +1013,8 @@ class KnowledgeStore:
         for item_id, by in batch["unlinked"]:
             if item_id in self.items and self.items[item_id].invalidated_by is None:
                 self.items[item_id].invalidated_by = by
-        self.version += 1
-        rest = [b for b in batches if b["batch"] != batch_id]
-        atomic_write(self.deleted_path, "".join(json.dumps(b) + "\n" for b in rest))
+        self.changed_everything()
+        self.backend.drop_deletion(batch_id)
         return batch
 
     def _reindex_names(self) -> None:

@@ -30,7 +30,7 @@ flowchart LR
     D["gm daemon<br/>(one per user, the only writer)"]
     D -- "notes" --> P
     D <--> B[("Session memory<br/>sessions/(id)/chain.jsonl<br/>kept until graduated")]
-    D <--> K[("Knowledge memory<br/>knowledge.json<br/>kept for good")]
+    D <--> K[("Knowledge memory<br/>memory.db (SQLite)<br/>kept for good")]
     B -- "graduation" --> K
 ```
 
@@ -47,7 +47,7 @@ There are two kinds of memory:
 | | Session memory | Knowledge memory |
 |---|---|---|
 | What | The turns of a live session: your prompt, Claude's reply, files touched, pages read | Single pieces of knowledge: decisions, facts, preferences, pitfalls, procedures, open items, things you learned |
-| Where | `~/.graph-memory/sessions/<session>/chain.jsonl` | `~/.graph-memory/knowledge.json` and `knowledge_vectors.json` |
+| Where | `~/.graph-memory/sessions/<session>/chain.jsonl` | `~/.graph-memory/memory.db`, one SQLite file |
 | How long | Until the turns graduate; the session's folder goes when the session ends | For good; it fades and gets retired, but only you delete it |
 | Used by | Graduation, and recall (to tell which topics the session is about) | Recall |
 
@@ -171,7 +171,7 @@ flowchart TD
     RE["2 · Resolve entities, no model<br/>exact name → 3-gram Jaccard ≥ 0.9 → embedding candidates ≥ 0.6"] --> M
     M["3 · Merge<br/>one model call: each new item vs. existing items<br/>about the same entities or close in meaning"] --> AP
     AP["4 · Apply<br/>reinforce duplicates · retire what became false<br/>add items, entities, typed edges"] --> S
-    S["Save knowledge.json"] --> SUM
+    S["Save what changed<br/>to memory.db"] --> SUM
     SUM["Replace the exchanges with the summary<br/>(or delete the folder if the session ended)"]
 ```
 
@@ -300,6 +300,23 @@ The fact above as it is stored, with some fields left out:
 `sources` records which sessions taught the item, now that their exchanges are gone. The
 fields `area`, `strength`, `uses` and `last_used` describe the item's life, which
 section 3 covers.
+
+**On disk.** Knowledge is kept in `~/.graph-memory/memory.db`, one SQLite file. Each
+item, entity, edge and graduation is a row holding the record above, plus the columns
+needed to find it (an item's type, scope and validity). Vectors are kept in the same
+file (2.7), so a note and its vector are always saved together.
+
+- **The daemon reads the notes and links once, at start.** Recall walks the links and
+  ranks notes by their area and strength on every prompt, so these stay in memory. At
+  10,000 notes the read, with building recall's word index, takes about 0.3 s. Vectors
+  are not read: they are searched where they are.
+- **A save writes only what changed.** Every change goes through the store, which notes
+  the records it touched. A save writes those rows, with any new vectors, in one
+  transaction: after a reply uses a note, one row. A crash leaves the memory as it was at
+  the last save, never half of one. SQLite's write-ahead log lets `gm export` read
+  while the daemon writes.
+- **Older memories** are JSON files (`knowledge.json`, `knowledge_vectors.json` and two
+  more). They keep working as they are until `gm migrate` moves them (3.4).
 
 ---
 
@@ -585,60 +602,84 @@ used them.
 
 ### 2.7 How the search is implemented
 
-Recall has no vector database and no search server. Everything is held in the daemon's
-memory and searched exactly.
+Recall needs no search server. The words are searched in the daemon's memory; the
+vectors are searched inside the SQLite file, exactly.
 
 ```mermaid
 flowchart LR
-    subgraph L["When a note is learned"]
-        T["statement + why"] --> M["all-MiniLM-L6-v2<br/>runs locally, about 40 ms"]
+    subgraph L["When a note is learned or changes"]
+        T["statement + why"] --> M["all-MiniLM-L6-v2<br/>runs locally, about 2 ms"]
         M --> V["384 numbers,<br/>scaled to length 1"]
-        V --> F[("knowledge_vectors.json")]
+        V --> F[("memory.db: vector table<br/>a row per note: vector,<br/>scope, recallable now")]
     end
     subgraph Q["On each prompt"]
         P["prompt"] --> M2["same model"] --> QV["prompt vector"]
-        F --> MX["one matrix in memory:<br/>a row per note"]
-        MX --> MUL["matrix × prompt vector<br/>= one score per note"]
-        QV --> MUL
-        MUL --> TOP["12 highest in scope,<br/>score 0.25 or more"]
+        QV --> S["sqlite-vec scans the rows<br/>in the session's scopes<br/>that can be recalled"]
+        F --> S
+        S --> TOP["12 closest,<br/>score 0.25 or more"]
     end
 ```
 
 **Meaning (vectors).**
 
-- **The model.** all-MiniLM-L6-v2 turns a text into 384 numbers. It ships with the
-  `chromadb` package and runs on your CPU, so nothing leaves the machine. Chroma's
-  database is not used, only its model.
+- **The model.** all-MiniLM-L6-v2 turns a text into 384 numbers. graph-memory runs it
+  with onnxruntime on your CPU, so nothing leaves the machine. The model files (about
+  90 MB) are downloaded once from Hugging Face, at a pinned revision checked against
+  their SHA-256. A prompt takes about 1.5 ms. (It used to come with the `chromadb`
+  package, whose wrapper padded every text to 256 tokens: the same vectors, about 25
+  times slower.)
+- **Why this model.** Small newer models were compared on this memory's own notes, with
+  a paraphrased question written for each note and the real prompts whose replies used
+  a note. On the paraphrases, gte-small and arctic-embed-s ranked the right note a
+  little higher (mean reciprocal rank 0.90 against 0.84), but none found more of them
+  in its top 12 (96 to 97% for all). On the real prompts all-MiniLM-L6-v2 did as well as
+  any. The others also crowd their scores together, so recall's thresholds, tuned to
+  this model's spread, would all need recalibrating.
 - **Storage.** Each note's vector is made once, from its statement and reason, when the
-  note is learned. All vectors live in one file, `knowledge_vectors.json`, as base64 of
-  32-bit floats, which is about a third the size of decimal text. Entities have vectors
-  too. Graduation uses them to match names; recall searches note vectors only.
-- **Search.** Vectors are stored scaled to length 1, so the dot product of two vectors
-  is their cosine similarity. The daemon holds all vectors as one numpy matrix and
-  multiplies it by the prompt's vector. That gives the exact similarity of the prompt
-  to every note in one step. On 384 vectors it takes about 0.1 ms. The matrix is
-  rebuilt on the first search after a note is added or removed.
-- **Why no vector database.** A vector database avoids comparing the prompt with every
-  vector by using an approximate index, which pays off with millions of vectors. Here
-  there are a few hundred, and the exact comparison is far cheaper than embedding the
-  prompt. A database would also add startup time for a daemon that restarts often, and
-  a second store to keep in step with `knowledge.json`.
+  note is learned. It is kept in `memory.db`, in a table of the
+  [sqlite-vec](https://github.com/asg017/sqlite-vec) extension, as 384 32-bit floats
+  (1.5 KB). Beside each vector the row keeps the note's scope and whether it can be
+  recalled now; when a note moves to another scope, is retired or comes back, its row
+  is updated in the same save. Entities have vectors too. Graduation uses them to match
+  names; recall searches note vectors only.
+- **Search.** Vectors are stored scaled to length 1, so the cosine similarity of two
+  vectors is their dot product. For a recall, sqlite-vec reads the rows of the notes
+  that are in the session's scopes and can be recalled, compares each with the prompt's
+  vector, and returns the 12 closest. It is an exact scan, done in C inside SQLite:
+  nothing about vectors is held in Python's memory. At 10,000 notes, a scope of 1,500
+  of them takes about 4 ms.
+- **Why exact, and why in SQLite.** A vector database's approximate index avoids
+  comparing the prompt with every vector, which pays off with millions of vectors. Here
+  there are hundreds to tens of thousands, and an approximate index would also have to
+  be told about scopes, or it would return the nearest notes from other projects and
+  leave too few from this one. Keeping vectors in the same file as the notes means one
+  save writes both, so they can never disagree after a crash, and there is no second
+  store to run. (Before SQLite the vectors were a JSON file the daemon read into one
+  numpy matrix; that is still how a memory in JSON files is searched.)
 
 **Words (BM25).**
 
 - Each note's text (statement, reason and the names of its entities) is split into
   words, with stop words removed and endings trimmed so "tests" matches "test". A
   hyphenated word also counts as its parts.
-- The daemon keeps a word count per note and how many notes contain each word. It
-  rebuilds these whenever the knowledge changes.
-- For a prompt, it scores every note in scope with the standard BM25 formula
-  (k1 = 1.2, b = 0.75): rare words count more, and long notes are not favoured. There is
-  no inverted index yet, so this is a loop over the notes. That is fast at hundreds of
-  notes and would need an index at tens of thousands.
+- The daemon keeps a word count per note, how many notes contain each word, and for
+  each word the notes that contain it (an inverted index).
+- For a prompt, it scores only the notes in scope that share a word with it, with the
+  standard BM25 formula (k1 = 1.2, b = 0.75): rare words count more, and long notes are
+  not favoured.
 
-**Where the time goes.** A recall takes about 46 ms in the daemon at the median. About
-40 ms of that is embedding the prompt. The two searches, PageRank and ranking share the
-rest.
+**Keeping up with changes.** The word index, the notes by scope and by entity, the entity
+names and the links PageRank walks are all kept up to date in place. Every change to the
+knowledge goes through the store, which writes down which notes, links or entities it
+touched. Before each recall the index redoes only those, so after a reply uses a note it
+takes about 0.06 ms, not a rebuild. A test makes hundreds of random changes and checks
+after each that the index equals one built from scratch, and every simulator scenario
+ends with the same check.
+
+**Where the time goes.** On this memory's real prompts a recall takes about 7 ms in the
+daemon at the median: 1.5 ms to embed the prompt and 5 ms for the searches, PageRank
+and ranking. On a synthetic memory of 10,000 notes in SQLite the recall itself takes
+about 8 ms, of which the vector search is 4 ms.
 
 ---
 
@@ -657,8 +698,8 @@ it.
 | A session's summary | Until the session ends, or 7 days without activity | The session's folder is deleted |
 | Exchanges whose graduation keeps failing | 3 failures, or 3 days | Dropped, and a `buffer_dropped` event is logged |
 | Knowledge items | For good | They fade, retire or get deleted by hand, as described below |
-| A summary of a project or topic | In `summaries.json`, until it is written again | Marked out of date when its notes change (section 4) |
-| Deleted items | In `knowledge_deleted.jsonl` | `gm knowledge undelete <batch>` puts them back |
+| A summary of a project or topic | In `memory.db`, until it is written again | Marked out of date when its notes change (section 4) |
+| Deleted items | In `memory.db`, in full | `gm knowledge undelete <batch>` puts them back |
 | The event log (`events.jsonl`) | 30 days (`events_days`) | Pruned once a day |
 | Claude Code's own transcripts | 30 days, by Claude Code | Until then, `gm knowledge regraduate` can rebuild a session's knowledge from them |
 
@@ -744,8 +785,8 @@ starts the review period over. `gm knowledge review` lists what is disputed or d
 worth keeping. The item leaves the graph with its edges. Two neighbours that were linked
 only through it would drift apart, so they get a **bridge** edge. Its strength is their
 two links multiplied, and there are at most 6 bridges per deletion. Every deletion is
-written in full to `knowledge_deleted.jsonl`, and `gm knowledge undelete <batch>` puts
-it back and removes its bridges.
+written down in full, and `gm knowledge undelete <batch>` puts it back and removes its
+bridges.
 
 ### 3.3 Moving or rebuilding knowledge
 
@@ -757,12 +798,21 @@ it back and removes its bridges.
 - `gm knowledge resummarize <session>` folds a session's summaries into one without
   touching its knowledge.
 
-### 3.4 The one real archive file
+### 3.4 The real archive files
 
-`gm migrate` is the one-time move from the old conversation-graph design, which kept
-every exchange for good. It packs the old files into `archive-<date>.tar.gz`, checks the
-archive opens, and only then deletes them. The archive is yours to keep or delete; the
-system never reads it again.
+`gm migrate` makes the only archives, when it moves an older memory to the current
+format. Each move runs once:
+
+- **From the conversation-graph design**, which kept every exchange for good: the old
+  files go into `archive-<date>.tar.gz`.
+- **From JSON files into `memory.db`.** Everything is copied into a new database, which
+  is then compared with the JSON files record by record, along with the nearest notes to
+  a sample of notes. Any difference stops the move and changes nothing. Otherwise the
+  JSON files go into `archive-<date>-json.tar.gz`.
+
+Each archive is checked to open before the old files are deleted. The archives are yours
+to keep or delete; the system never reads them again. `gm export` writes memory out as
+JSON files at any time, to read in an editor or to take back to an older version.
 
 ---
 
@@ -777,7 +827,7 @@ flowchart TD
     S["You pick a project or topic<br/>and press Summarize"] --> N["Its notes that are still true"]
     N --> M["One model call, in the background"]
     M --> B["Brief: overview + 6 sections,<br/>each point cites its notes"]
-    B --> C[("summaries.json<br/>a cache, not knowledge")]
+    B --> C[("memory.db, apart from the notes<br/>a cache, not knowledge")]
     C --> P["Knowledge page<br/>or gm knowledge summarize"]
     K["Later: notes added, removed,<br/>reworded or disputed"] -.-> R
     P -.-> R["Marked out of date,<br/>with a Refresh button"]
@@ -832,9 +882,8 @@ summary. This also makes a summary a quick way to find notes that are wrong or o
 date: a point that looks wrong leads straight to the note behind it, where you can mark
 it no longer true.
 
-**A summary is a view, not knowledge.** It is kept in `~/.graph-memory/summaries.json`,
-apart from `knowledge.json`. It is never stored as a note and never recalled into a
-session. Otherwise memory would hold a second, shorter copy of itself that could drift
+**A summary is a view, not knowledge.** It is kept in its own table in `memory.db`,
+apart from the notes. It is never stored as a note and never recalled into a session. Otherwise memory would hold a second, shorter copy of itself that could drift
 from the notes.
 
 **It is marked when out of date, not rewritten.** A summary remembers which notes it was

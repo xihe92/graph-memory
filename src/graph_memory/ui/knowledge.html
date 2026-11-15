@@ -32,6 +32,13 @@
   .btn { background: rgba(255,255,255,.06); border: 1px solid var(--line-strong); border-radius: 8px;
     padding: 5px 11px; cursor: pointer; white-space: nowrap; text-decoration: none; }
   .btn:hover { background: rgba(255,255,255,.12); }
+  .viewctl { display: inline-flex; align-items: center; gap: 6px; }  /* wraps as one */
+  .viewctl .btn { padding: 3px 10px; font-size: 12px; }
+  .seg { display: inline-flex; border: 1px solid var(--line-strong); border-radius: 8px; overflow: hidden; }
+  .seg button { background: none; border: 0; padding: 4px 10px; color: var(--muted); cursor: pointer; font-size: 12px; }
+  .seg button + button { border-left: 1px solid var(--line-strong); }
+  .seg button[aria-pressed="true"] { background: rgba(255,224,102,.16); color: var(--text); }
+  .seg button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
   label.tg { display: flex; align-items: center; gap: 5px; color: var(--muted); font-size: 12px; cursor: pointer; }
   label.tg input { margin: 0; accent-color: var(--accent); }
   #search { width: 220px; background: rgba(0,0,0,.25); border: 1px solid var(--line-strong);
@@ -50,6 +57,7 @@
   .fchip.review[aria-pressed="true"] { background: rgba(255,159,10,.18); border-color: var(--warn); }
   select.scope { background: rgba(0,0,0,.25); border: 1px solid var(--line-strong); border-radius: 8px;
     padding: 4px 8px; color: var(--text); font: inherit; font-size: 12px; max-width: 200px; }
+  .linkbtn.more { display: block; margin: 6px 14px 10px; }
   .linkbtn { background: none; border: 0; color: var(--muted); cursor: pointer; font-size: 12px; text-decoration: underline; padding: 0; }
   .pair { padding: 8px 14px; border-bottom: 1px solid rgba(255,255,255,.04); }
   .pair .arrow { color: var(--faint); font-size: 11px; margin: 3px 0; }
@@ -145,6 +153,10 @@
   <div class="chips" id="chips"></div>
   <div class="spacer"></div>
   <div class="filters" id="filters" role="group" aria-label="Filters"></div>
+  <div class="viewctl">
+    <div class="seg" role="group" aria-label="Graph view"><button data-act="view" data-v="3d">3D</button><button data-act="view" data-v="2d">2D</button></div>
+    <button class="btn" data-act="recenter" title="Show the whole graph, as when the page first opens">Recenter</button>
+  </div>
   <label class="tg"><input type="checkbox" id="showEnt" checked> entities</label>
   <input id="search" placeholder="Search   ( / )" autocomplete="off">
   <a class="btn" href="/help">Memory help</a>
@@ -156,7 +168,11 @@
 <section id="brief" class="panel" aria-live="polite" aria-label="Summary"></section>
 <div id="toast" class="panel" role="status"></div>
 
-<script src="/vendor/3d-force-graph.min.js"></script>
+<!-- the graph libraries: only the one for the chosen view is loaded (see loadLibrary) -->
+<template id="lib-3d"><script src="/vendor/3d-force-graph.min.js"></script></template>
+<template id="lib-2d"><script src="/vendor/force-graph.min.js"></script></template>
+<!-- the layout worker and the layout library it loads (see layOut) -->
+<template id="lib-layout"><script src="/layout.js"></script><script src="/vendor/d3-force-3d.bundle.js"></script></template>
 <script src="/kview.js"></script>
 <script src="/idle.js"></script>
 <script>
@@ -186,6 +202,91 @@ function saveFilters() { try { localStorage.setItem(FKEY, JSON.stringify(S.f)); 
 const S = { data: null, showEnt: true, f: loadFilters(), v: null, on: null, litEnt: new Set(), match: null, selected: null, fitted: false,
   picking: false, picked: new Set(), deleted: [],
   brief: { open: false, scope: null, data: null, timer: null } };
+// notes opened by click, reused while memory has not changed since the page loaded it
+const NOTES = KView.noteCache(200);
+// Where each node was last drawn, and where the camera was, for each view: switching back
+// to a view, or rebuilding it for a filter or new data, shows it as it was left
+const POS = { "3d": new Map(), "2d": new Map() };
+const CAM = { "3d": null, "2d": null };
+// Positions and cameras are kept in this browser across reloads, so the page opens on the
+// graph as it was left; only notes that still exist are kept
+const PKEY = "gm.knowledge.layout";
+function loadLayout() {
+  try {
+    const s = JSON.parse(localStorage.getItem(PKEY) || "null");
+    if (!s || s.v !== 1) return;
+    for (const view of ["3d", "2d"]) {
+      for (const [id, p] of Object.entries(s.pos[view] || {})) POS[view].set(id, { x: p[0], y: p[1], z: p[2] ?? undefined });
+      CAM[view] = (s.cam || {})[view] || null;
+    }
+  } catch (e) {
+    console.warn("graph-memory: the saved layout could not be read", e);
+  }
+}
+let saveTimer = null;
+function saveLayoutNow() {
+  clearTimeout(saveTimer);
+  if (!S.data) return;
+  remember();
+  const alive = new Set([...S.data.items.map((i) => i.id), ...S.data.entities.map((e) => e.id)]);
+  const r = (v) => (v === undefined || v === null || Number.isNaN(v) ? null : Math.round(v * 10) / 10);
+  const pos = {};
+  for (const view of ["3d", "2d"]) {
+    pos[view] = {};
+    for (const [id, p] of POS[view]) if (alive.has(id)) pos[view][id] = [r(p.x), r(p.y), r(p.z)];
+  }
+  try { localStorage.setItem(PKEY, JSON.stringify({ v: 1, pos, cam: CAM })); } catch (e) { /* full or blocked */ }
+}
+function saveLayout() {  // soon, once things are quiet
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveLayoutNow, 400);
+}
+loadLayout();
+
+// A full layout (and, for a large graph, the first settling into a view) runs in a Web
+// Worker, so the page stays responsive; the graph library then draws the result without a
+// layout of its own. Small graphs below this size keep the library's animated layout.
+const WORKER_AT = 1000;
+let worker = null;
+let layoutSeq = 0;
+function layOut(view, nodes, links, ticks, friction) {
+  if (worker) worker.terminate();  // a newer layout replaces one still running
+  const scripts = $("lib-layout").content.querySelectorAll("script");
+  worker = new Worker(scripts[0].getAttribute("src"));
+  const seq = ++layoutSeq;
+  const ids = nodes.map((n) => n.id);
+  const at = new Map(ids.map((id, i) => [id, i]));
+  const n = ids.length;
+  const x = new Float32Array(n).fill(NaN), y = new Float32Array(n).fill(NaN), z = new Float32Array(n).fill(NaN);
+  nodes.forEach((node, i) => { if (node.x !== undefined) { x[i] = node.x; y[i] = node.y; if (node.z !== undefined) z[i] = node.z; } });
+  const end = (v) => (typeof v === "object" ? v.id : v);
+  const ls = links.filter((l) => at.has(end(l.source)) && at.has(end(l.target)));
+  const job = {
+    dims: view === "3d" ? 3 : 2, ids, x, y, z, ticks, friction,
+    src: Int32Array.from(ls, (l) => at.get(end(l.source))), dst: Int32Array.from(ls, (l) => at.get(end(l.target))),
+    about: Uint8Array.from(ls, (l) => (l.relation === "about" ? 1 : 0)), weight: Float32Array.from(ls, (l) => l.weight || 0),
+  };
+  const w = worker;
+  return new Promise((ok, fail) => {
+    w.onmessage = (e) => {
+      w.terminate(); if (worker === w) worker = null;
+      if (e.data.seq !== layoutSeq) return;  // a newer layout is on its way
+      const pos = new Map();
+      ids.forEach((id, i) => pos.set(id, { x: e.data.pos[3 * i], y: e.data.pos[3 * i + 1], z: view === "3d" ? e.data.pos[3 * i + 2] : undefined }));
+      ok(pos);
+    };
+    w.onerror = (e) => { w.terminate(); if (worker === w) worker = null; fail(new Error(e.message || "the layout worker failed")); };
+    w.postMessage({ deps: scripts[1].getAttribute("src"), seq, job });
+  });
+}
+function status(text) {
+  $("loading").textContent = text;
+  $("loading").style.display = text ? "grid" : "none";
+}
+
+// the side list shows this many rows per group until the group is opened in full
+const LIST_CAP = 60;
+const OPEN = new Set();
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
@@ -212,28 +313,84 @@ async function api(path, body) {
   return data;
 }
 
-const G = ForceGraph3D({ controlType: "orbit" })($("graph"))
-  .backgroundColor("#0a0d13").showNavInfo(false).nodeId("id")
-  .nodeRelSize(3).nodeOpacity(0.95).nodeResolution(14)
-  .nodeVal((n) => (n.kind === "entity" ? 0.6 + Math.min(n.mentions, 8) * 0.25 : 1.4 + Math.min(n.strength, 6) * 0.6))
-  .nodeColor(nodeColor)
-  .nodeLabel((n) => `<div class="tip"><small>${n.kind === "entity" ? esc(n.ekind) : esc(n.type)}</small>${esc(n.label)}</div>`)
-  .linkColor(linkColor)
-  .linkWidth((l) => (l.relation === "about" ? 0.2 : 0.4 + l.weight * 2.2))
-  .linkOpacity(0.85)
-  .linkCurvature((l) => (l.relation === "supersedes" ? 0.25 : 0))
-  .linkDirectionalArrowLength((l) => (l.relation === "supersedes" || l.relation === "depends_on" || l.relation === "causes" ? 3 : 0))
-  .linkDirectionalArrowRelPos(1)
-  .linkLabel((l) => `<div class="tip"><small>${esc(l.relation)}${l.relation === "about" ? "" : " · " + l.weight}</small>${esc(l.reason || "")}</div>`)
-  .onNodeClick((n) => select(n.id, true))
-  .onBackgroundClick(() => clear())
-  .cooldownTicks(200)
-  .onEngineStop(() => { if (!S.fitted) { S.fitted = true; G.zoomToFit(700, 90); } });
-GraphIdle.quietWhenStill(G);  // stop drawing while nothing moves: an open page stays cool
-G.d3Force("link")
-  .distance((l) => (l.relation === "about" ? 26 : 40 - l.weight * 20))
-  .strength((l) => (l.relation === "about" ? 0.25 : 0.2 + l.weight * 0.6));
-G.d3Force("charge").strength(-40);
+// The graph: 3D (3d-force-graph) or 2D (force-graph), the person's choice, remembered.
+// Both libraries take the same settings; only the camera differs.
+const VKEY = "gm.knowledge.view";
+let VIEW = (() => { try { return localStorage.getItem(VKEY) === "2d" ? "2d" : "3d"; } catch (e) { return "3d"; } })();
+let G = null;
+let SHOWN = null;  // the view G draws (VIEW changes first while switching)
+let idle = null;
+function loadLibrary(view) {
+  if (view === "3d" ? window.ForceGraph3D : window.ForceGraph) return Promise.resolve();
+  const src = $("lib-" + view).content.querySelector("script").getAttribute("src");
+  return new Promise((ok, fail) => {
+    const s = document.createElement("script");
+    s.src = src; s.onload = ok; s.onerror = () => fail(new Error("could not load the graph library"));
+    document.head.appendChild(s);
+  });
+}
+function makeGraph(view) {
+  if (G) { remember(); idle.stop(); G._destructor(); $("graph").innerHTML = ""; }
+  SHOWN = view;
+  const three = view === "3d";
+  G = (three ? ForceGraph3D({ controlType: "orbit" }) : ForceGraph())($("graph"))
+    .backgroundColor("#0a0d13").nodeId("id")
+    .nodeRelSize(three ? 3 : 4)
+    .nodeVal((n) => (n.kind === "entity" ? 0.6 + Math.min(n.mentions, 8) * 0.25 : 1.4 + Math.min(n.strength, 6) * 0.6))
+    .nodeColor(nodeColor)
+    .nodeLabel((n) => `<div class="tip"><small>${n.kind === "entity" ? esc(n.ekind) : esc(n.type)}</small>${esc(n.label)}</div>`)
+    .linkColor(linkColor)
+    .linkWidth((l) => (l.relation === "about" ? 0.2 : 0.4 + l.weight * 2.2))
+    .linkCurvature((l) => (l.relation === "supersedes" ? 0.25 : 0))
+    .linkDirectionalArrowLength((l) => (l.relation === "supersedes" || l.relation === "depends_on" || l.relation === "causes" ? (three ? 3 : 4) : 0))
+    .linkDirectionalArrowRelPos(1)
+    .linkLabel((l) => `<div class="tip"><small>${esc(l.relation)}${l.relation === "about" ? "" : " · " + l.weight}</small>${esc(l.reason || "")}</div>`)
+    .onNodeClick((n) => select(n.id, true))
+    .onBackgroundClick(() => clear())
+    .cooldownTicks(200)
+    .onEngineStop(() => {
+      if (S.restoreCam) { restoreCamera(S.restoreCam); S.restoreCam = null; }
+      // nodes pinned while new ones settled in are free again (to drag, to settle later)
+      if (S.pinned && S.pinned.size) {
+        for (const n of G.graphData().nodes) if (S.pinned.has(n.id)) n.fx = n.fy = n.fz = undefined;
+        S.pinned.clear();
+      }
+      // fit the view once the layout settles, unless the person has already moved the
+      // camera or picked a note: then the view is theirs. While the worker lays out, the
+      // nodes drawn are placeholders: wait for the real layout.
+      if (!S.fitted && !S.layingOut) { S.fitted = true; if (!S.touched) G.zoomToFit(700, 90); }
+      if (!S.layingOut) saveLayout();
+    })
+    // dragging a node lets the layout react, as without the worker; then it settles again
+    .onNodeDrag(() => { if (G.cooldownTicks() !== Infinity) G.cooldownTicks(Infinity); })
+    .onNodeDragEnd(() => { G.cooldownTicks(60); });
+  if (three) G.showNavInfo(false).nodeOpacity(0.95).nodeResolution(14).linkOpacity(0.85);
+  G.width(innerWidth).height(innerHeight);
+  idle = GraphIdle.quietWhenStill(G);  // stop drawing while nothing moves: an open page stays cool
+  G.d3Force("link")
+    .distance((l) => (l.relation === "about" ? 26 : 40 - l.weight * 20))
+    .strength((l) => (l.relation === "about" ? 0.25 : 0.2 + l.weight * 0.6));
+  G.d3Force("charge").strength(-40);
+  S.fitted = false;
+  S.touched = false;
+  S.before = null;  // a new graph has its own camera: nothing to fly back to
+  S.restoreCam = null;
+  document.querySelectorAll('[data-act="view"]').forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === view)));
+}
+async function setView(view) {
+  if (view === VIEW && G) return;
+  try { await loadLibrary(view); } catch (e) { toast(`<span>${esc(e.message)}</span>`); return; }
+  VIEW = view;
+  try { localStorage.setItem(VKEY, view); } catch (e) { /* private window */ }
+  makeGraph(view);
+  if (S.data) {
+    G.graphData(graphData()); G.nodeColor(nodeColor).linkColor(linkColor);
+    // back to this view as it was left. The 3D library sets its default camera when it
+    // first takes the data, a moment later, so the camera is put back again once it has
+    if (restoreCamera(view)) { S.fitted = true; S.restoreCam = view; }
+  }
+  saveLayout();  // the view left, and the choice of view
+}
 
 // highlighted: what the filters and the search both leave in (null: everything)
 function refreshShown() {
@@ -260,7 +417,34 @@ function linkColor(l) {
   return rgba(c, l.relation === "about" ? 0.35 : 0.75);
 }
 
-function graphData() {
+function remember() {
+  // a graph just made has no nodes yet: there is nothing of its own to remember, and its
+  // default camera must not overwrite the one saved for this view
+  if (!G || !G.graphData().nodes.length) return;
+  const pos = POS[SHOWN];
+  // while the worker lays out, the drawn positions are placeholders: not worth keeping
+  if (!S.layingOut) for (const n of G.graphData().nodes) if (n.x !== undefined) pos.set(n.id, { x: n.x, y: n.y, z: n.z });
+  // while a note is open after a fly-to, the view to keep is the one from before it
+  const b = S.before && S.before.view === SHOWN ? S.before : camera(SHOWN);
+  CAM[SHOWN] = b.view === "3d" ? { pos: b.pos, target: b.target } : { zoom: b.zoom, x: b.x, y: b.y };
+}
+function camera(view) {
+  if (view === "3d") {
+    const c = G.cameraPosition(), t = G.controls().target;
+    return { view, pos: { x: c.x, y: c.y, z: c.z }, target: { x: t.x, y: t.y, z: t.z } };
+  }
+  const c = G.centerAt();
+  return { view, zoom: G.zoom(), x: c.x, y: c.y };
+}
+function restoreCamera(view) {
+  const c = CAM[view];
+  if (!c) return false;
+  if (view === "3d") G.cameraPosition(c.pos, c.target, 0);
+  else { G.zoom(c.zoom, 0); G.centerAt(c.x, c.y, 0); }
+  return true;
+}
+function graphData(fresh = false) {
+  if (!fresh) remember();
   const d = S.data;
   S.v = KView.view(d, S.f);
   S.litEnt = KView.litEntities(d.items, S.v.lit);
@@ -274,6 +458,29 @@ function graphData() {
     const used = new Set();
     for (const i of items) for (const e of i.entities) { used.add(e); links.push({ source: i.id, target: e, relation: "about", weight: 1 }); }
     for (const e of d.entities) if (used.has(e.id)) nodes.push({ id: e.id, kind: "entity", ekind: e.kind, label: e.name, mentions: e.mentions });
+  }
+  const plan = KView.arrange(nodes, links, POS[VIEW], POS[VIEW === "3d" ? "2d" : "3d"], VIEW === "3d");
+  S.pinned = new Set(plan.pinned);
+  // how much layout it needs: none when every node has its place; a settling-in otherwise
+  const [friction, steps] = { restore: [0.4, 0], grow: [0.4, 120], settle: [0.85, 60], layout: [0.4, 200] }[plan.mode];
+  if ((plan.mode === "layout" || plan.mode === "settle") && nodes.length >= WORKER_AT) {
+    // the worker lays out; the library draws what it has meanwhile, without laying out
+    const view = VIEW;
+    S.layingOut = true;
+    status(`Laying out ${nodes.length.toLocaleString()} nodes…`);
+    layOut(view, nodes, links, steps, friction).then((pos) => {
+      if (!pos || VIEW !== view || !G) return;
+      remember();  // the camera; positions are placeholders until now
+      for (const [id, p] of pos) POS[view].set(id, p);
+      S.layingOut = false;
+      status("");
+      if (!S.touched) S.fitted = false;  // fit once the real layout is drawn
+      G.graphData(graphData(true)); G.nodeColor(nodeColor).linkColor(linkColor);
+    }).catch((e) => { S.layingOut = false; status(""); toast(`<span>${esc(e.message)}</span>`); });
+    if (G) G.d3VelocityDecay(friction).cooldownTicks(0);
+  } else {
+    S.layingOut = false;
+    if (G) G.d3VelocityDecay(friction).cooldownTicks(steps);
   }
   return { nodes, links };
 }
@@ -364,12 +571,16 @@ function renderSide() {
 }
 function renderSideBody() {
   const on = S.on;
+  const more = (key, hidden) => (hidden ? `<button class="linkbtn more" data-act="more" data-g="${key}">Show ${hidden} more</button>` : "");
   if (S.f.status.includes("gone") && S.v.pairs.length) {
     const pairs = S.v.pairs.filter((p) => !S.match || S.match.has(p.old.id) || (p.by && S.match.has(p.by.id)));
-    const others = S.v.items.filter((i) => i.valid && on && on.has(i.id) && !pairs.some((p) => p.by && p.by.id === i.id));
+    const replacements = new Set(pairs.filter((p) => p.by).map((p) => p.by.id));
+    const others = S.v.items.filter((i) => i.valid && on && on.has(i.id) && !replacements.has(i.id));
+    const pc = KView.capped(pairs.map((p) => ({ id: p.old.id, p })), LIST_CAP, OPEN.has("gone"), S.selected);
+    const oc = KView.capped(others, LIST_CAP, OPEN.has("others"), S.selected);
     $("side").innerHTML = `<div class="grp"><h2><i style="background:var(--bad)"></i>No longer true <span>${pairs.length}</span></h2>
-      ${pairs.map((p) => `<div class="pair">${itemRow(p.old)}<div class="arrow">${p.by ? "replaced by" : esc(p.old.invalid_reason || "marked by hand")}</div>${p.by ? itemRow(p.by) : ""}</div>`).join("")}</div>` +
-      (others.length ? `<div class="grp"><h2>Also matching <span>${others.length}</span></h2>${others.map(itemRow).join("")}</div>` : "");
+      ${pc.rows.map(({ p }) => `<div class="pair">${itemRow(p.old)}<div class="arrow">${p.by ? "replaced by" : esc(p.old.invalid_reason || "marked by hand")}</div>${p.by ? itemRow(p.by) : ""}</div>`).join("")}${more("gone", pc.hidden)}</div>` +
+      (others.length ? `<div class="grp"><h2>Also matching <span>${others.length}</span></h2>${oc.rows.map(itemRow).join("")}${more("others", oc.hidden)}</div>` : "");
     return;
   }
   const items = S.v.items.filter((i) => !on || on.has(i.id));
@@ -380,10 +591,11 @@ function renderSideBody() {
   }
   const by = {};
   for (const i of items) (by[i.type] ||= []).push(i);
-  $("side").innerHTML = Object.keys(TYPE).filter((t) => by[t]).map((t) => `<div class="grp">
-    <h2><i style="background:${TYPE[t]}"></i>${TYPE_NAME[t]} <span>${by[t].length}</span></h2>
-    ${by[t].sort((a, b) => b.strength - a.strength || b.created_at.localeCompare(a.created_at)).map(itemRow).join("")}
-  </div>`).join("");
+  $("side").innerHTML = Object.keys(TYPE).filter((t) => by[t]).map((t) => {
+    const c = KView.capped(by[t].sort((a, b) => b.strength - a.strength || b.created_at.localeCompare(a.created_at)), LIST_CAP, OPEN.has(t), S.selected);
+    return `<div class="grp"><h2><i style="background:${TYPE[t]}"></i>${TYPE_NAME[t]} <span>${by[t].length}</span></h2>
+    ${c.rows.map(itemRow).join("")}${more(t, c.hidden)}</div>`;
+  }).join("");
 }
 // ---- the summary of one scope: a brief the model writes from that scope's notes
 function scopeKind(key) {
@@ -471,7 +683,8 @@ async function load() {
   if (!S.data.items.length) $("loading").textContent = "No knowledge yet.";
   try { S.deleted = (await api("/api/kreview")).deleted; } catch (e) { S.deleted = []; }
   renderChips(); renderFilters(); renderLegend();
-  G.graphData(graphData()); renderSide();
+  await setView(VIEW);  // makes the graph and gives it the data
+  renderSide();
   openFromHash();
 }
 
@@ -487,23 +700,58 @@ window.addEventListener("hashchange", () => { if (S.data) openFromHash(); });
 
 async function select(id, fly = false) {
   S.selected = id;
+  if (fly) S.touched = true;
   G.nodeColor(nodeColor).linkColor(linkColor);
   renderSide();
   if (fly) {
     const n = G.graphData().nodes.find((x) => x.id === id);
-    if (n && n.x !== undefined) {
+    // where the camera was before the first fly-to: closing the note goes back there,
+    // however many notes were opened in between
+    if (n && n.x !== undefined && !S.before) S.before = camera(VIEW);
+    if (n && n.x !== undefined && VIEW === "3d") {
       const r = 1 + 90 / Math.hypot(n.x, n.y, n.z || 1);
       G.cameraPosition({ x: n.x * r, y: n.y * r, z: n.z * r }, n, 800);
+    } else if (n && n.x !== undefined) {
+      G.centerAt(n.x, n.y, 800);
+      G.zoom(3, 800);
     }
   }
-  let d;
-  try { d = await api(`/api/kitem?id=${encodeURIComponent(id)}`); } catch (e) { return; }
+  let d = NOTES.get(id, S.data.version);
+  if (!d) {
+    try { d = await api(`/api/kitem?id=${encodeURIComponent(id)}`); } catch (e) { return; }
+    NOTES.put(id, d);
+  }
   $("detail").innerHTML = d.item ? itemHtml(d) : entityHtml(d);
   $("detail").classList.add("open");
 }
 function clear() {
   S.selected = null; $("detail").classList.remove("open");
   G.nodeColor(nodeColor).linkColor(linkColor); renderSide();
+  flyBack();
+}
+// The whole graph in view, as when the page first opens. An open note stays open; closing
+// it then leaves the camera here, since this is where it was asked to be.
+function recenter() {
+  if (!G || !G.graphData().nodes.length) return;
+  S.before = null;
+  S.fitted = true;  // a layout that finishes later does not fit again over it
+  if (VIEW !== "3d") return G.zoomToFit(700, 90);
+  // 3D: the library's fit would keep the angle the camera was turned to; back to the
+  // opening direction instead, in one move
+  const box = G.getGraphBbox();
+  if (!box) return;
+  const cam = G.camera();
+  const home = KView.homeCamera(box, cam.fov, cam.aspect, G.height(), 90);
+  G.cameraPosition(home.pos, home.target, 700);
+}
+// Closing a note the camera flew to takes the camera back to where it was before: same
+// place, same direction, and in 3D turning around the same point again.
+function flyBack() {
+  const b = S.before;
+  S.before = null;
+  if (!b || b.view !== VIEW) return;
+  if (b.view === "3d") G.cameraPosition(b.pos, b.target, 800);
+  else { G.centerAt(b.x, b.y, 800); G.zoom(b.zoom, 800); }
 }
 function head(kind, color, id, text) {
   return `<div class="dh"><button class="close" data-act="close">×</button>
@@ -579,6 +827,7 @@ async function reload() {
   try { S.deleted = (await api("/api/kreview")).deleted; } catch (e) { S.deleted = []; }
   renderChips(); applyFilters();
   if (S.brief.open) loadBrief();  // its notes may have changed
+  if ($("search").value.trim()) search($("search").value);
 }
 let toastTimer = null;
 function toast(html) {
@@ -608,6 +857,9 @@ document.addEventListener("click", (ev) => {
   const t = ev.target.closest("[data-id],[data-act],[data-f]");
   if (!t) return;
   if (t.dataset.f === "clear") { S.f = KView.defaults(); closeBrief(); return applyFilters(); }
+  if (t.dataset.act === "view") return setView(t.dataset.v);
+  if (t.dataset.act === "recenter") return recenter();
+  if (t.dataset.act === "more") { OPEN.add(t.dataset.g); return renderSide(); }
   if (t.dataset.act === "brief-open") return openBrief();
   if (t.dataset.act === "brief-close") return closeBrief();
   if (t.dataset.act === "brief-write") return writeBrief(false);
@@ -656,19 +908,27 @@ document.addEventListener("change", (ev) => {
   }
   if (ev.target.id === "withGlobal") { S.f.withGlobal = ev.target.checked; applyFilters(); }
 });
+for (const type of ["pointerdown", "wheel"]) $("graph").addEventListener(type, () => { S.touched = true; }, { passive: true });
 $("showEnt").onchange = (e) => { S.showEnt = e.target.checked; G.graphData(graphData()); };
-$("search").oninput = (e) => {
-  const q = e.target.value.trim().toLowerCase();
-  if (!q) S.match = null;
-  else {
-    S.match = new Set();
-    const ents = new Set(S.data.entities.filter((x) => x.name.toLowerCase().includes(q)).map((x) => x.id));
-    for (const i of S.data.items)
-      if ((i.statement + " " + i.why).toLowerCase().includes(q) || i.entities.some((x) => ents.has(x))) S.match.add(i.id);
-    for (const x of ents) S.match.add(x);
-  }
-  refreshShown(); G.nodeColor(nodeColor).linkColor(linkColor); renderSide();
-};
+// Search runs in the daemon, over each note's statement and reason and the entities'
+// names: the page does not load the reasons. The newest answer wins.
+let searchSeq = 0;
+let searchTimer = null;
+function showMatch() { refreshShown(); G.nodeColor(nodeColor).linkColor(linkColor); renderSide(); }
+function search(text) {
+  const q = text.trim();
+  clearTimeout(searchTimer);
+  const seq = ++searchSeq;
+  if (!q) { S.match = null; return showMatch(); }
+  searchTimer = setTimeout(async () => {
+    let res;
+    try { res = await api(`/api/ksearch?q=${encodeURIComponent(q)}`); } catch (e) { return; }
+    if (seq !== searchSeq) return;
+    S.match = new Set([...res.items, ...res.entities]);
+    showMatch();
+  }, 150);
+}
+$("search").oninput = (e) => search(e.target.value);
 document.addEventListener("keydown", (e) => {
   if (e.key === "/" && document.activeElement !== $("search")) { e.preventDefault(); $("search").focus(); }
   if (e.key === "Escape") { if ($("detail").classList.contains("open") || !S.brief.open) clear(); else closeBrief(); }
@@ -677,7 +937,8 @@ document.addEventListener("keydown", (e) => {
     else act("retract", S.selected, $("reason").value);
   }
 });
-window.addEventListener("resize", () => { G.width(innerWidth).height(innerHeight); fitTop(); });
+window.addEventListener("resize", () => { if (G) G.width(innerWidth).height(innerHeight); fitTop(); });
+window.addEventListener("pagehide", saveLayoutNow);  // leaving or reloading: keep the layout
 load();
 </script>
 </body>

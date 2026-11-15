@@ -38,6 +38,7 @@ from . import clock
 from .adapters.base import Turn, mentioned_files
 from .buffer import Exchange, SessionBuffer, Summary
 from .config import Config
+from .embedding import MODELS, LocalEmbedder
 from .events import EventLog, events_path, prune_events, read_events
 from .graduation import (
     SUMMARY_CHARS,
@@ -55,10 +56,10 @@ from .graduation import (
 )
 from .judge import build_judge_prompt, verdicts
 from .knowledge import (
-    KNOWLEDGE_FILE,
     TOPIC_PREFIX,
-    VECTORS_FILE,
+    Entity,
     Item,
+    ItemEdge,
     KnowledgeStore,
     Segment,
     at_risk,
@@ -70,7 +71,8 @@ from .knowledge_recall import KnowledgeIndex, note, tokens, used_by
 from .knowledge_recall import recall as knowledge_recall
 from .models import CommandModel, claude_code_model
 from .projects import project_of
-from .vectors import Embedder, atomic_write, chroma_default_embedder
+from .storage import json_note, sqlite_problem
+from .vectors import Embedder, atomic_write
 
 if TYPE_CHECKING:
     from .webui import UIServer
@@ -89,7 +91,6 @@ RESCOPE_JOB = "memory:rescope"  # the queue's name for that job (it is no sessio
 RESCOPE_FILE = "rescope.json"
 SUMMARIZE = "summarize"  # the model writes a brief of one scope's items for a person
 SUMMARIZE_JOB = "memory:summarize:"  # + the scope: the queue's name for that job
-SUMMARY_FILE = "summaries.json"  # the briefs, by scope; a cache, not knowledge
 
 
 def _rebuild_diff(
@@ -154,8 +155,9 @@ def _import(spec: str) -> Any:
 def build_embedder(cfg: Config) -> Embedder | None:
     if cfg.embedder == "none":
         return None
-    if cfg.embedder == "chroma-default":
-        return chroma_default_embedder()
+    name = "all-MiniLM-L6-v2" if cfg.embedder in ("chroma-default", "default") else cfg.embedder
+    if name in MODELS:
+        return LocalEmbedder(name)
     factory: Callable[[], Embedder] = _import(cfg.embedder)
     return factory()
 
@@ -341,7 +343,10 @@ class Daemon:
         ]
         self.sweep(trigger="sweep")  # sessions left over from before this daemon started
         log.info("daemon listening on %s (pid %d)", sock, os.getpid())
-        self.events.emit("daemon", op="start", pid=os.getpid())
+        self.events.emit("daemon", op="start", pid=os.getpid(), storage=self.knowledge.backend.name)
+        note = json_note(self.knowledge.backend.name)
+        if note:
+            log.warning(note)
         self._start_ui()
         self.ready.set()
         try:
@@ -358,7 +363,9 @@ class Daemon:
             for t in tasks:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-            self.knowledge.save()
+            # everything once more, as insurance against a change that was never marked
+            self.knowledge.save(full=True)
+            self.knowledge.close()
             with contextlib.suppress(FileNotFoundError):
                 sock.unlink()
             self.events.emit("daemon", op="stop", pid=os.getpid())
@@ -491,7 +498,9 @@ class Daemon:
                 return {"version": self.buffer.version, "unchanged": True}
             return self.sessions_view()
         if method == "knowledge":
-            return self.knowledge_view()
+            return self.knowledge_view(lean=bool(p.get("lean")))
+        if method == "knowledge_search":
+            return self.knowledge_search(str(p.get("q") or ""))
         if method == "knowledge_item":
             return self.knowledge_detail(str(p["id"]))
         if method == "knowledge_retract":
@@ -530,8 +539,12 @@ class Daemon:
             "pid": os.getpid(),
             "ui": self.ui.url if self.ui is not None else None,
             "buffer": self.buffer.stats(),
-            # the conversation graph from before the redesign is still on disk
-            "needs_migration": (self.cfg.home / "graph.json").exists(),
+            # the conversation graph from before the redesign is still on disk, or the
+            # memory is still in the JSON files from before SQLite and can move
+            "needs_migration": (self.cfg.home / "graph.json").exists()
+            or (self.knowledge.backend.name == "json" and sqlite_problem() is None),
+            "storage": self.knowledge.backend.name,
+            "storage_note": json_note(self.knowledge.backend.name),
             "knowledge": {
                 **self.knowledge.stats(),
                 "graduation": self.ask is not None,
@@ -1034,10 +1047,8 @@ class Daemon:
             pdir = self._preview_dir(session)
             shutil.rmtree(pdir, ignore_errors=True)
             pdir.mkdir(parents=True)
-            self.knowledge.save()
-            for name in (KNOWLEDGE_FILE, VECTORS_FILE):
-                if (self.cfg.home / name).exists():
-                    shutil.copy2(self.cfg.home / name, pdir / name)
+            self.knowledge.copy_to(pdir)  # saved first; then a copy to change freely
+            self.knowledge_dirty = False
             store = KnowledgeStore(pdir, self.embedder)
         else:
             store = self.knowledge
@@ -1074,6 +1085,9 @@ class Daemon:
                 ms=round((time.perf_counter() - started) * 1000, 1),
             )
             return
+        finally:
+            if store is not self.knowledge:
+                store.close()
         result = _rebuild_diff(base, store, done, summary, session, len(xs))
         if preview:
             (self._preview_dir(session) / "preview.json").write_text(json.dumps(result, indent=1))
@@ -1219,13 +1233,14 @@ class Daemon:
             raise ValueError("memory changed since the preview: run the preview again")
         pdir = self._preview_dir(session)
         preview = KnowledgeStore(pdir, self.embedder)
-        for name in (KNOWLEDGE_FILE, VECTORS_FILE):
-            if (pdir / name).exists():
-                atomic_write(self.cfg.home / name, (pdir / name).read_text(encoding="utf-8"))
+        done = [preview.segments[g] for g in result["segments"] if g in preview.segments]
+        # the preview's memory replaces this one: close it, copy the preview over it, open
+        self.knowledge.close()
+        preview.copy_to(self.cfg.home)
+        preview.close()
         self.knowledge = KnowledgeStore(self.cfg.home, self.embedder)
         self.kindex = KnowledgeIndex(self.knowledge)
         self.knowledge_dirty = False
-        done = [preview.segments[g] for g in result["segments"] if g in preview.segments]
         xs = [
             Exchange(prompt="", reply="", ts=datetime.fromisoformat(t))
             for t in (result["start"], result["end"])
@@ -1343,7 +1358,8 @@ class Daemon:
     def _session_topics(self, session: str, prompt: str) -> set[str]:
         """The topics memory knows that this session is about: named in the prompt, in
         the exchanges it has waiting, or in its summaries."""
-        scopes = set(self.knowledge.topics().values())
+        self.kindex.fresh()
+        scopes = self.kindex.topics()  # topics with something recall can show
         if not scopes:
             return set()
         texts = [prompt]
@@ -1566,6 +1582,7 @@ class Daemon:
                 continue
             name = topic_of(c["to"])
             it.scope = (k.topic_key(name) or c["to"]) if name else c["to"]
+            k.touch(c["id"])
             done.append(c["id"])
         k.save()
         self.knowledge_dirty = False
@@ -1583,6 +1600,7 @@ class Daemon:
         scope = self._scope_ref(to)
         for i in ids:
             k.items[i].scope = scope
+        k.touch(*ids)
         k.save()
         self.knowledge_dirty = False
         self.events.emit("knowledge_scope", items=ids, scope=scope)
@@ -1631,12 +1649,7 @@ class Daemon:
         return title, f"the project {title}"
 
     def _summaries(self) -> dict[str, Any]:
-        path = self.cfg.home / SUMMARY_FILE
-        try:
-            data = json.loads(path.read_text())
-        except (OSError, json.JSONDecodeError):
-            return {}
-        return data if isinstance(data, dict) else {}
+        return self.knowledge.summaries()
 
     def knowledge_summarize(self, to: str, force: bool = False) -> dict[str, Any]:
         """Queue a brief of one scope's valid items (see summarize.py). Nothing is queued
@@ -1688,7 +1701,8 @@ class Daemon:
         valid = {i.scope for i in self.knowledge.valid_items()}
         kept = {k: v for k, v in self._summaries().items() if k in valid}  # drop empty scopes
         kept[scope] = brief
-        atomic_write(self.cfg.home / SUMMARY_FILE, json.dumps(kept, indent=1))
+        self.knowledge.set_summaries(kept)
+        self.knowledge_dirty = False
         self.events.emit(
             SUMMARIZE,
             ok=True,
@@ -1788,63 +1802,93 @@ class Daemon:
             ],
         }
 
-    def knowledge_view(self) -> dict[str, Any]:
+    def knowledge_view(self, lean: bool = False) -> dict[str, Any]:
+        """Every item, entity and edge. `lean` (the Knowledge page) leaves out what only an
+        item's detail shows (reason, sources, provenance, review dates): the page loads
+        those on click, by id, and searches through the daemon."""
         k = self.knowledge
+        now = clock.now()
+
+        def item(i: Item) -> dict[str, Any]:
+            out: dict[str, Any] = {
+                "id": i.item_id,
+                "type": i.type.value,
+                "statement": i.statement,
+                "scope": i.scope,
+                "entities": i.entities,
+                "valid": i.valid,
+                "strength": i.strength,
+                "area": i.area.value,
+                "uses": i.uses,
+                "created_at": i.created_at.isoformat(),
+                "invalid_at": i.invalid_at.isoformat() if i.invalid_at else None,
+                "invalidated_by": i.invalidated_by,
+                "invalid_reason": i.invalid_reason,
+                "disputes": i.disputes,
+                "overdue": i.overdue(now),
+            }
+            if not lean:
+                out.update(
+                    why=i.why,
+                    vitality=round(i.vitality(now), 2),
+                    sources=[s.model_dump(mode="json") for s in i.sources],
+                    origin=i.origin.value,
+                    ref=i.ref,
+                    applies_to=i.applies_to,
+                    volatility=i.volatility.value,
+                    checked=i.checked.isoformat(),
+                    dispute_reason=i.dispute_reason,
+                    recallable=i.recallable,
+                )
+            return out
+
+        def entity(e: Entity) -> dict[str, Any]:
+            out: dict[str, Any] = {
+                "id": e.entity_id,
+                "name": e.name,
+                "kind": e.kind.value,
+                "mentions": e.mentions,
+            }
+            if not lean:
+                out["summary"] = e.summary
+            return out
+
+        def edge(e: ItemEdge) -> dict[str, Any]:
+            out: dict[str, Any] = {
+                "source": e.source,
+                "target": e.target,
+                "relation": e.relation.value,
+                "weight": e.weight,
+                "reason": e.reason,
+            }
+            if not lean:
+                out["origin"] = e.origin
+            return out
+
         return {
+            "version": k.version,
             "stats": k.stats(),
             "scopes": scope_names(i.scope for i in k.items.values()),
-            "entities": [
-                {
-                    "id": e.entity_id,
-                    "name": e.name,
-                    "kind": e.kind.value,
-                    "summary": e.summary,
-                    "mentions": e.mentions,
-                }
-                for e in k.entities.values()
-            ],
-            "items": [
-                {
-                    "id": i.item_id,
-                    "type": i.type.value,
-                    "statement": i.statement,
-                    "why": i.why,
-                    "scope": i.scope,
-                    "entities": i.entities,
-                    "valid": i.valid,
-                    "strength": i.strength,
-                    "area": i.area.value,
-                    "uses": i.uses,
-                    "vitality": round(i.vitality(), 2),
-                    "created_at": i.created_at.isoformat(),
-                    "invalid_at": i.invalid_at.isoformat() if i.invalid_at else None,
-                    "invalidated_by": i.invalidated_by,
-                    "invalid_reason": i.invalid_reason,
-                    "sources": [s.model_dump(mode="json") for s in i.sources],
-                    "origin": i.origin.value,
-                    "ref": i.ref,
-                    "applies_to": i.applies_to,
-                    "volatility": i.volatility.value,
-                    "checked": i.checked.isoformat(),
-                    "disputes": i.disputes,
-                    "dispute_reason": i.dispute_reason,
-                    "overdue": i.overdue(),
-                    "recallable": i.recallable,
-                }
-                for i in k.items.values()
-            ],
-            "edges": [
-                {
-                    "source": e.source,
-                    "target": e.target,
-                    "relation": e.relation.value,
-                    "weight": e.weight,
-                    "origin": e.origin,
-                    "reason": e.reason,
-                }
-                for e in k.edges.values()
-            ],
+            "entities": [entity(e) for e in k.entities.values()],
+            "items": [item(i) for i in k.items.values()],
+            "edges": [edge(e) for e in k.edges.values()],
         }
+
+    def knowledge_search(self, q: str) -> dict[str, Any]:
+        """Items whose statement or reason contains the words, case aside, or that are about
+        an entity whose name does; and those entities. What the Knowledge page's search
+        box highlights."""
+        q = q.strip().lower()
+        k = self.knowledge
+        if not q:
+            return {"q": q, "items": [], "entities": []}
+        ents = {e.entity_id for e in k.entities.values() if q in e.name.lower()}
+        items = [
+            i.item_id
+            for i in k.items.values()
+            if q in f"{i.statement} {i.why}".lower() or ents.intersection(i.entities)
+        ]
+        return {"q": q, "items": items, "entities": sorted(ents)}
 
     def knowledge_detail(self, ref: str) -> dict[str, Any]:
         k = self.knowledge
@@ -1855,12 +1899,14 @@ class Daemon:
                 raise KeyError(ref)
             e = k.entities[eid]
             return {
+                "version": k.version,
                 "entity": e.model_dump(mode="json"),
                 "items": [i.model_dump(mode="json") for i in k.items.values() if eid in i.entities],
             }
         item = k.items[iid]
         due = item.review_due()
         return {
+            "version": k.version,
             "item": item.model_dump(mode="json"),
             "vitality": round(item.vitality(), 3),
             "checked": item.checked.isoformat(),

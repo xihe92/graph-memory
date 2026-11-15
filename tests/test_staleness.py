@@ -123,3 +123,17 @@ def test_provenance_survives_a_save(tmp_path: Path) -> None:
         Volatility.VERSIONED,
     )
     assert again.disputes == 1 and again.dispute_reason == "maybe not"
+
+
+def test_a_dormant_item_stays_dormant_when_memory_loads(tmp_path: Path) -> None:
+    """Loading used to run the "stated again" promotion, which revived every dormant
+    item until the next maintenance pass put it back to sleep."""
+    from graph_memory.knowledge import Area
+
+    k = KnowledgeStore(tmp_path)
+    asleep = k.add_item(Item(type=ItemType.FACT, statement="faded long ago", strength=3.0))
+    asleep.area = Area.DORMANT
+    k.touch(asleep.item_id)
+    k.save()
+    k.close()
+    assert KnowledgeStore(tmp_path).items[asleep.item_id].area is Area.DORMANT

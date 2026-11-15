@@ -144,7 +144,109 @@
     return { sections, cited: num.size };
   }
 
-  const KView = { STATUS, AREAS, defaults, clean, active, needsReview, passes, view, litEntities, look, counts, toggle, selectable, brief };
+  // Notes opened by click. A note fetched at memory version v is reused while the page's
+  // data is no newer than v (versions only grow, so it is as fresh as the page); the
+  // least recently opened go first once `max` are kept.
+  function noteCache(max) {
+    const notes = new Map();
+    return {
+      get(id, version) {
+        const hit = notes.get(id);
+        if (!hit || !(hit.version >= version)) return null;
+        notes.delete(id);
+        notes.set(id, hit);
+        return hit;
+      },
+      put(id, note) {
+        notes.delete(id);
+        notes.set(id, note);
+        while (notes.size > max) notes.delete(notes.keys().next().value);
+      },
+      size: () => notes.size,
+    };
+  }
+
+  // Where a rebuilt graph's node starts: where it was last drawn. Coming from 2D into 3D
+  // it gets a small random depth, or the 3D layout would have nothing to spread it along.
+  function placed(saved, three, rnd) {
+    if (!saved || saved.x === undefined) return {};
+    const out = { x: saved.x, y: saved.y };
+    if (three) out.z = saved.z !== undefined && saved.z !== null ? saved.z : ((rnd || Math.random)() - 0.5) * 30;
+    return out;
+  }
+
+  // Where a rebuilt graph's nodes start, from the places each view remembers ("mine": this
+  // view's, "other": the other view's), and how much layout it then needs:
+  //   restore  every node has a place in this view: drawn as it was, no layout at all
+  //   grow     some are new: the known ones are pinned (fx, fy, fz) and each new one starts
+  //            next to a placed node it links to, then settles in; the page unpins after
+  //   settle   this view was never shown: start from the other view's shape, settle gently
+  //   layout   nothing is known: lay out from scratch
+  function arrange(nodes, links, mine, other, three, rnd) {
+    rnd = rnd || Math.random;
+    const jitter = () => (rnd() - 0.5) * 30;
+    const known = nodes.filter((n) => mine.has(n.id));
+    if (known.length && known.length === nodes.length) {
+      for (const n of nodes) Object.assign(n, placed(mine.get(n.id), three, rnd));
+      return { mode: "restore", pinned: [] };
+    }
+    if (known.length) {
+      const pinned = [];
+      for (const n of known) {
+        const at = placed(mine.get(n.id), three, rnd);
+        Object.assign(n, at, { fx: at.x, fy: at.y }, three ? { fz: at.z } : {});
+        pinned.push(n.id);
+      }
+      const byId = new Map(nodes.map((n) => [n.id, n]));
+      for (const l of links) {
+        for (const [a, b] of [[l.source, l.target], [l.target, l.source]]) {
+          const n = byId.get(a), m = byId.get(b);
+          if (n && m && n.x === undefined && m.x !== undefined) {
+            n.x = m.x + jitter(); n.y = m.y + jitter();
+            if (three) n.z = (m.z || 0) + jitter();
+          }
+        }
+      }
+      return { mode: "grow", pinned };
+    }
+    let fromOther = 0;
+    for (const n of nodes) {
+      const at = placed(other.get(n.id), three, rnd);
+      if (at.x !== undefined) { Object.assign(n, at); fromOther++; }
+    }
+    return { mode: nodes.length && fromOther >= 0.8 * nodes.length ? "settle" : "layout", pinned: [] };
+  }
+
+  // The rows of one group of the side list: the first `cap` (the list comes sorted, the
+  // strongest first) unless the group was opened in full, plus the picked row wherever it
+  // is, so a note clicked in the graph always shows. A list of thousands of rows would cost
+  // the browser a sixth of a second to lay out on every click.
+  // The 3D camera that shows the whole graph from where the page first looks: straight down
+  // the z axis, upright. The library's own fit (zoomToFit) keeps whatever angle the camera
+  // was turned to; this is its calculation for that one direction. `box` is the graph's
+  // bounding box ({x: [min, max], y: …, z: …}); `fov` the camera's vertical field of view in
+  // degrees; `pad` the margin in pixels, as zoomToFit takes it.
+  function homeCamera(box, fov, aspect, height, pad) {
+    const half = ((1 - (2 * pad) / height) * fov) / 2 * (Math.PI / 180);  // vertical
+    const wide = Math.atan(Math.tan(half) * aspect);                       // horizontal
+    const mid = { x: (box.x[0] + box.x[1]) / 2, y: (box.y[0] + box.y[1]) / 2, z: (box.z[0] + box.z[1]) / 2 };
+    // how far back the camera must be for every corner of the box to fit on screen
+    let back = 0;
+    for (const x of box.x) for (const y of box.y) for (const z of box.z) {
+      const dx = x - mid.x, dy = y - mid.y, dz = z - mid.z;
+      back = Math.max(back, Math.max(Math.abs(dy) / Math.tan(half), Math.abs(dx) / Math.tan(wide)) + dz);
+    }
+    return { pos: { x: mid.x, y: mid.y, z: mid.z + back }, target: mid };
+  }
+
+  function capped(rows, cap, open, keep) {
+    if (open || rows.length <= cap) return { rows, hidden: 0 };
+    const head = rows.slice(0, cap);
+    const extra = keep ? rows.slice(cap).find((r) => r.id === keep) : null;
+    return { rows: extra ? head.concat([extra]) : head, hidden: rows.length - cap - (extra ? 1 : 0) };
+  }
+
+  const KView = { STATUS, AREAS, defaults, clean, active, needsReview, passes, view, litEntities, look, counts, toggle, selectable, brief, noteCache, placed, arrange, homeCamera, capped };
   if (typeof module !== "undefined" && module.exports) module.exports = KView;
   else root.KView = KView;
 })(typeof globalThis !== "undefined" ? globalThis : this);

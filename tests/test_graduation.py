@@ -279,7 +279,7 @@ def test_daemon_graduates_on_request(short_dir: Path) -> None:
             "session_end",
             1,
         )
-        assert (cfg.home / "knowledge.json").exists()  # saved before the buffer went
+        assert (cfg.home / "memory.db").exists()  # saved before the buffer went
     finally:
         call(cfg, "shutdown", autostart=False)
         t.join(5)

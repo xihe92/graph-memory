@@ -28,10 +28,12 @@ from datetime import datetime
 from . import clock
 from .knowledge import (
     ORIGIN_LABEL,
+    TOPIC_PREFIX,
     Item,
     ItemType,
     KnowledgeStore,
     Relation,
+    Volatility,
     normalize_name,
     topic_of,
 )
@@ -41,6 +43,8 @@ RRF_K = 60
 ALPHA = 0.2  # restart probability
 EPSILON = 1e-4
 MAX_DEGREE = 20  # strongest edges kept per node
+_WORD = re.compile(r"\w+")
+_AFTER_NAME = re.compile(r"[\w-]|\.\w")
 _TOKEN = re.compile(r"[a-z0-9][a-z0-9_.\-/]*[a-z0-9]|[a-z0-9]")
 _STOP = frozenset(
     "a an and are as at be but by can do does for from has have how i if in is it its "
@@ -121,80 +125,203 @@ class Recalled:
 
 
 class KnowledgeIndex:
-    """Adjacency and BM25 statistics, rebuilt when the store changes."""
+    """What recall looks things up in, kept up to date in place: the recallable items by
+    scope and by entity, word counts with an inverted index for BM25, entity names by
+    their first word, and the weighted links PageRank walks.
+
+    It reads the store's change log (`KnowledgeStore.touch`), so a change costs work for
+    the items it touched and their neighbours, not a rebuild of everything. Each node's
+    strongest links are worked out when PageRank first asks for them, and again only
+    after something near it changed."""
 
     def __init__(self, store: KnowledgeStore) -> None:
         self.store = store
         self.version = -1
-        self.adj: dict[str, list[tuple[str, float]]] = {}
-        self.wdeg: dict[str, float] = {}
-        self.docs: dict[str, Counter[str]] = {}
-        self.df: Counter[str] = Counter()
-        self.avg_len = 1.0
-        self.names: list[tuple[re.Pattern[str], str]] = []
+        self._epoch = -1
+        self._cursor = 0
+        self.live: set[str] = set()  # recallable when last touched
+        self._volatile: set[str] = set()  # of those, the ones that stop when overdue
+        self.by_scope: dict[str, set[str]] = defaultdict(set)
+        self._scope_of: dict[str, str] = {}
         self.by_entity: dict[str, set[str]] = defaultdict(set)
+        self._entities_of: dict[str, tuple[str, ...]] = {}
+        # item links, valid or not, as the strongest weight between two items
+        self._links: dict[str, dict[str, float]] = defaultdict(dict)
+        self._adj: dict[str, list[tuple[str, float]]] = {}  # built on demand
+        self._wdeg: dict[str, float] = {}
+        self.docs: dict[str, Counter[str]] = {}
+        self._len: dict[str, int] = {}
+        self._total_len = 0
+        self.df: Counter[str] = Counter()
+        self._postings: dict[str, set[str]] = defaultdict(set)
+        # entity names: first word (or first character, for a name that starts with
+        # one that is not a word character) -> {(name as written, entity)}
+        self._names: dict[str, set[tuple[str, str]]] = defaultdict(set)
+        self._name_keys: dict[str, list[tuple[str, tuple[str, str]]]] = {}  # entity -> entries
+
+    @property
+    def avg_len(self) -> float:
+        return self._total_len / len(self.docs) if self.docs else 1.0
+
+    # ------------------------------------------------------------------ upkeep
 
     def fresh(self) -> None:
-        if self.version == self.store.version:
-            return
-        self.version = self.store.version
         s = self.store
-        valid = {i.item_id: i for i in s.valid_items() if i.recallable}
-        edges: dict[str, dict[str, float]] = defaultdict(dict)
+        if self.version == s.version:
+            return
+        if self._epoch != s.epoch or self.version < 0:
+            self._rebuild()
+        else:
+            items: set[str] = set()
+            pairs: set[tuple[str, str]] = set()
+            ents: set[str] = set()
+            for entry in s.journal[self._cursor :]:
+                if entry[0] == "item":
+                    items.add(entry[1])
+                elif entry[0] == "pair":
+                    pairs.add((entry[1], entry[2]))
+                else:
+                    ents.add(entry[1])
+            for a, b in pairs:
+                self._update_pair(a, b)
+            for i in items:
+                self._update_item(i)
+            for e in ents:
+                self._update_names(e)
+        self._epoch, self._cursor, self.version = s.epoch, len(s.journal), s.version
 
-        def link(a: str, b: str, w: float) -> None:
-            if w <= 0:
-                return
-            edges[a][b] = max(edges[a].get(b, 0.0), w)
-            edges[b][a] = max(edges[b].get(a, 0.0), w)
-
-        degree = Counter(e for i in valid.values() for e in i.entities)
-        self.by_entity = defaultdict(set)
-        for i in valid.values():
-            for e in i.entities:
-                self.by_entity[e].add(i.item_id)
-        for i in valid.values():
-            for e in i.entities:
-                link(i.item_id, "e:" + e, 1.0 / math.log2(2 + degree[e]))
+    def _rebuild(self) -> None:
+        s = self.store
+        self.__init__(s)  # type: ignore[misc]
         for edge in s.edges.values():
-            if edge.relation is Relation.SUPERSEDES:
+            self._link(edge.source, edge.target)
+        for it in s.items.values():
+            if it.recallable:
+                self._add_item(it)
+        for e in self.by_entity:
+            self._update_names(e)
+
+    def _link(self, a: str, b: str) -> None:
+        """The strongest edge between two items, supersedes left out (it is history)."""
+        edges = self.store.edges
+        w = max(
+            (
+                e.weight
+                for rel in Relation
+                if rel is not Relation.SUPERSEDES
+                for e in (edges.get((a, b, rel.value)), edges.get((b, a, rel.value)))
+                if e is not None
+            ),
+            default=0.0,
+        )
+        if w > 0:
+            self._links[a][b] = self._links[b][a] = w
+        else:
+            self._links[a].pop(b, None)
+            self._links[b].pop(a, None)
+
+    def _update_pair(self, a: str, b: str) -> None:
+        self._link(a, b)
+        self._stale(a, b)
+
+    def _update_item(self, item_id: str) -> None:
+        it = self.store.items.get(item_id)
+        before = set(self._entities_of.get(item_id, ()))
+        if item_id in self.live:
+            self._remove_item(item_id)
+        if it is not None and it.recallable:
+            self._add_item(it)
+        after = set(self._entities_of.get(item_id, ()))
+        # an entity's link weight depends on how many items it has, so its items move too
+        for e in before | after:
+            self._stale("e:" + e, *self.by_entity.get(e, ()))
+            self._update_names(e)
+        self._stale(item_id, *self._links.get(item_id, ()))
+
+    def _add_item(self, it: Item) -> None:
+        i = it.item_id
+        self.live.add(i)
+        if it.volatility is Volatility.VOLATILE:
+            self._volatile.add(i)
+        self.by_scope[it.scope].add(i)
+        self._scope_of[i] = it.scope
+        self._entities_of[i] = tuple(it.entities)
+        for e in it.entities:
+            self.by_entity[e].add(i)
+        ents = self.store.entities
+        names = " ".join(ents[e].name for e in it.entities if e in ents)
+        tf = Counter(tokens(f"{it.statement} {it.why} {names}"))
+        self.docs[i] = tf
+        self._len[i] = sum(tf.values())
+        self._total_len += self._len[i]
+        self.df.update(tf.keys())
+        for t in tf:
+            self._postings[t].add(i)
+
+    def _remove_item(self, i: str) -> None:
+        self.live.discard(i)
+        self._volatile.discard(i)
+        scope = self._scope_of.pop(i)
+        self.by_scope[scope].discard(i)
+        if not self.by_scope[scope]:
+            del self.by_scope[scope]
+        for e in self._entities_of.pop(i, ()):
+            self.by_entity[e].discard(i)
+            if not self.by_entity[e]:
+                del self.by_entity[e]
+        tf = self.docs.pop(i)
+        self._total_len -= self._len.pop(i)
+        for t in tf:
+            self.df[t] -= 1
+            if not self.df[t]:
+                del self.df[t]
+            self._postings[t].discard(i)
+            if not self._postings[t]:
+                del self._postings[t]
+
+    def _stale(self, *nodes: str) -> None:
+        for n in nodes:
+            self._adj.pop(n, None)
+            self._wdeg.pop(n, None)
+
+    def _update_names(self, entity_id: str) -> None:
+        for key, entry in self._name_keys.pop(entity_id, []):
+            self._names[key].discard(entry)
+            if not self._names[key]:
+                del self._names[key]
+        ent = self.store.entities.get(entity_id)
+        if ent is None or not self.by_entity.get(entity_id):
+            return
+        entries = []
+        for n in {ent.name, *ent.aliases}:
+            norm = normalize_name(n)
+            if len(norm) < 4:
                 continue
-            if edge.source in valid and edge.target in valid:
-                link(edge.source, edge.target, edge.weight)
-        self.adj = {
-            u: sorted(nb.items(), key=lambda t: -t[1])[:MAX_DEGREE] for u, nb in edges.items()
-        }
-        self.wdeg = {u: sum(w for _, w in nb) for u, nb in self.adj.items()}
+            forms = [norm]
+            base = norm.rsplit("/", 1)[-1]
+            if "/" in norm and len(base) >= 5 and "." in base:  # a file named by basename
+                forms.append(base)
+            for form in forms:
+                head = _WORD.match(form)
+                key = head.group() if head else form[0]
+                entries.append((key, (form, entity_id)))
+                self._names[key].add((form, entity_id))
+        self._name_keys[entity_id] = entries
 
-        ents = s.entities
-        self.docs = {}
-        self.df = Counter()
-        for i in valid.values():
-            names = " ".join(ents[e].name for e in i.entities if e in ents)
-            tf = Counter(tokens(f"{i.statement} {i.why} {names}"))
-            self.docs[i.item_id] = tf
-            self.df.update(tf.keys())
-        lens = [sum(tf.values()) for tf in self.docs.values()]
-        self.avg_len = (sum(lens) / len(lens)) if lens else 1.0
+    # ------------------------------------------------------------------ lookups
 
-        self.names = []
-        for ent in ents.values():
-            if degree.get(ent.entity_id, 0) == 0:
-                continue
-            eid = ent.entity_id
-            for n in {ent.name, *ent.aliases}:
-                norm = normalize_name(n)
-                if len(norm) < 4:
-                    continue
-                pat = re.compile(rf"(?<![\w/.-]){re.escape(norm)}(?![\w-]|\.\w)")
-                self.names.append((pat, eid))
-                base = norm.rsplit("/", 1)[-1]
-                if "/" in norm and len(base) >= 5 and "." in base:  # a file named by basename
-                    self.names.append(
-                        (re.compile(rf"(?<![\w/.-]){re.escape(base)}(?![\w-]|\.\w)"), eid)
-                    )
+    def visible(self, scopes: Iterable[str]) -> set[str]:
+        """The recallable items in these scopes."""
+        out: set[str] = set()
+        for s in scopes:
+            out |= self.by_scope.get(s, set())
+        if out & self._volatile:
+            out -= {i for i in out & self._volatile if not self.store.items[i].recallable}
+        return out
 
-    # ------------------------------------------------------------------ seeds
+    def topics(self) -> set[str]:
+        """The topic scopes that have recallable items."""
+        return {s for s in self.by_scope if s.startswith(TOPIC_PREFIX)}
 
     def about(self, entity_id: str) -> set[str]:
         """The recallable items about an entity."""
@@ -203,35 +330,113 @@ class KnowledgeIndex:
     def bm25(
         self, query: Sequence[str], k: int = 10, among: set[str] | None = None
     ) -> list[tuple[str, float]]:
-        """The best word matches, among the given items when a set is given. Word
-        statistics stay those of the whole store, so a score means the same in every
-        scope."""
+        """The best word matches, among the given items when a set is given. Only items
+        that share a word with the query are scored. Word statistics stay those of the
+        whole store, so a score means the same in every scope."""
         n = len(self.docs)
         if not n:
             return []
         q = Counter(query)
+        cands: set[str] = set()
+        for t in q:
+            cands |= self._postings.get(t, set())
+        if among is not None:
+            cands &= among
+        avg = self.avg_len
         out = []
-        for doc_id, tf in self.docs.items():
-            if among is not None and doc_id not in among:
-                continue
-            dl = sum(tf.values())
+        for doc_id in cands:
+            tf, dl = self.docs[doc_id], self._len[doc_id]
             score = 0.0
             for t in q:
                 f = tf.get(t)
                 if not f:
                     continue
                 idf = math.log(1 + (n - self.df[t] + 0.5) / (self.df[t] + 0.5))
-                score += idf * f * 2.2 / (f + 1.2 * (0.25 + 0.75 * dl / self.avg_len))
+                score += idf * f * 2.2 / (f + 1.2 * (0.25 + 0.75 * dl / avg))
             if score > 0:
                 out.append((doc_id, score))
-        out.sort(key=lambda t: -t[1])
+        out.sort(key=lambda t: (-t[1], t[0]))
         return out[:k]
 
     def mentioned(self, text: str) -> list[str]:
+        """The entities the text names, as whole words: a name counts where it is not
+        preceded by a word character, `/`, `.` or `-`, nor followed by a word character,
+        `-`, or a dot and a word character ("redis" in "redis-cli" does not count)."""
         low = text.lower()
-        return list(dict.fromkeys(eid for pat, eid in self.names if pat.search(low)))
+        found: dict[str, None] = {}
 
-    # ------------------------------------------------------------------ ppr
+        def at(s: int, key: str) -> None:
+            if s and low[s - 1] in "/.-":
+                return
+            for form, eid in self._names.get(key, ()):
+                if low.startswith(form, s) and not _AFTER_NAME.match(low, s + len(form)):
+                    found.setdefault(eid)
+
+        for m in _WORD.finditer(low):
+            at(m.start(), m.group())
+        for s, ch in enumerate(low):
+            if ch in self._names and not _WORD.match(ch) and not (s and _WORD.match(low[s - 1])):
+                at(s, ch)
+        return list(found)
+
+    def differences(self) -> list[str]:
+        """How this index differs from one built from scratch on the same store: empty
+        when the change log missed nothing. For tests and the simulator."""
+        self.fresh()
+        ref = KnowledgeIndex(self.store)
+        ref.fresh()
+
+        def parts(ix: KnowledgeIndex) -> dict[str, object]:
+            return {
+                "live": ix.live,
+                "volatile": ix._volatile,
+                "by_scope": {k: v for k, v in ix.by_scope.items() if v},
+                "by_entity": {k: v for k, v in ix.by_entity.items() if v},
+                "docs": ix.docs,
+                "df": +ix.df,
+                "length": ix._total_len,
+                "postings": {k: v for k, v in ix._postings.items() if v},
+                "names": {k: v for k, v in ix._names.items() if v},
+                "links": {k: v for k, v in ix._links.items() if v},
+            }
+
+        mine, theirs = parts(self), parts(ref)
+        out = [k for k in mine if mine[k] != theirs[k]]
+        nodes = ref.live | {"e:" + e for e in ref.by_entity}
+        out += [f"links of {n}" for n in sorted(nodes) if self.neighbours(n) != ref.neighbours(n)]
+        return out
+
+    # ------------------------------------------------------------------ graph
+
+    def neighbours(self, node: str) -> list[tuple[str, float]]:
+        """A node's strongest links (at most MAX_DEGREE): an item's links to recallable
+        items and to its entities, an entity's links to its recallable items. An entity
+        link weighs 1 / log2(2 + the entity's item count), so a hub passes on little."""
+        got = self._adj.get(node)
+        if got is not None:
+            return got
+        nb: list[tuple[str, float]]
+        if node.startswith("e:"):
+            items = self.by_entity.get(node[2:], set())
+            w = 1.0 / math.log2(2 + len(items))
+            nb = [(i, w) for i in items]
+        elif node in self.live:
+            nb = [(v, w) for v, w in self._links.get(node, {}).items() if v in self.live]
+            nb += [
+                ("e:" + e, 1.0 / math.log2(2 + len(self.by_entity[e])))
+                for e in dict.fromkeys(self._entities_of[node])
+            ]
+        else:
+            nb = []
+        got = sorted(nb, key=lambda t: (-t[1], t[0]))[:MAX_DEGREE]
+        self._adj[node] = got
+        self._wdeg[node] = sum(w for _, w in got)
+        return got
+
+    def degree(self, node: str) -> float:
+        if node not in self._wdeg:
+            self.neighbours(node)
+        return self._wdeg[node]
 
     def ppr(
         self, seeds: dict[str, float], alpha: float = ALPHA, eps: float = EPSILON
@@ -252,7 +457,7 @@ class KnowledgeIndex:
         while queue and pushes < 50000:
             u = queue.pop()
             ru = r.get(u, 0.0)
-            deg = self.wdeg.get(u, 0.0)
+            deg = self.degree(u)
             if deg <= 0:
                 p[u] += alpha * ru
                 r[u] = 0.0
@@ -263,11 +468,11 @@ class KnowledgeIndex:
             p[u] += alpha * ru
             spread = (1 - alpha) * ru
             r[u] = 0.0
-            for v, w in self.adj[u]:
+            for v, w in self.neighbours(u):
                 before = r.get(v, 0.0)
                 after = before + spread * w / deg
                 r[v] = after
-                dv = self.wdeg.get(v, 0.0)
+                dv = self.degree(v)
                 if before < eps * dv <= after:
                     queue.append(v)
         return dict(p)
@@ -289,6 +494,9 @@ class Here:
 
     def sees(self, item: Item) -> bool:
         return item.scope == "global" or item.scope == self.project or item.scope in self.topics
+
+    def scopes(self) -> list[str]:
+        return ["global", *([self.project] if self.project else []), *self.topics]
 
 
 def recall(
@@ -319,12 +527,8 @@ def recall(
     prefs = sorted(
         (
             i
-            for i in store.valid_items()
-            if i.type is ItemType.PREFERENCE
-            and i.recallable
-            and i.item_id not in skip
-            and i.item_id not in have
-            and here.sees(i)
+            for i in map(store.items.__getitem__, index.visible(here.scopes()))
+            if i.type is ItemType.PREFERENCE and i.item_id not in skip and i.item_id not in have
         ),
         key=lambda i: -i.vitality(now),
     )[: pol.standing]
@@ -428,9 +632,11 @@ def _ranked(
     # only what this session may see can seed: a strong match out of scope (a SQLite
     # item, in a session that is not about SQLite) must neither open the gate below nor
     # push its mass along shared entities to unrelated items in scope
-    visible = {i.item_id for i in store.valid_items() if i.recallable and here.sees(i)}
+    visible = index.visible(here.scopes())
     vec = vector if vector is not None else store.embed(prompt)
-    by_vector = store.similar(vec, "item", pol.vector_k, pol.vector_floor, among=visible)
+    by_vector = store.similar(
+        vec, "item", pol.vector_k, pol.vector_floor, among=visible, scopes=here.scopes()
+    )
     raw_words = index.bm25(tokens(prompt), among=visible)
     q = set(tokens(prompt))
 

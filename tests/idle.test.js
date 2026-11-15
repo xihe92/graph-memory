@@ -20,7 +20,9 @@ function fakeTarget() {
   const handlers = {};
   return {
     addEventListener: (type, fn) => (handlers[type] = fn),
-    fire: (type) => handlers[type](),
+    removeEventListener: (type, fn) => { if (handlers[type] === fn) delete handlers[type]; },
+    fire: (type) => handlers[type] && handlers[type](),
+    count: () => Object.keys(handlers).length,
   };
 }
 
@@ -86,4 +88,27 @@ assert.equal(G.drawing, true);
 G.settle(); idle.check();
 assert.equal(G.drawing, false);
 
+// the 2D graph has centerAt and zoom instead of cameraPosition: those wake it, the
+// missing one is left alone; and a page that swaps graphs stops watching the old one
+{
+  let now2 = 0;
+  const G2 = fakeGraph();
+  delete G2.cameraPosition;
+  G2.centerAt = (...args) => (args.length ? (G2.calls.push("centerAt"), G2) : "value");
+  G2.zoom = (...args) => (args.length ? (G2.calls.push("zoom"), G2) : "value");
+  const page2 = fakeTarget();
+  const idle2 = quietWhenStill(G2, { now: () => now2, target: page2, interval: false, quietMs: 2000 });
+  assert.equal(G2.cameraPosition, undefined);
+  G2.settle(); now2 = 5000; idle2.check();
+  assert.equal(G2.drawing, false);
+  G2.centerAt(1, 2, 800);  // a camera move of 800 ms is drawn to the end
+  assert.equal(G2.drawing, true);
+  now2 = 7500; idle2.check();
+  assert.equal(G2.drawing, true);
+  now2 = 7800; idle2.check();
+  assert.equal(G2.drawing, false);
+  assert.ok(page2.count() > 0);
+  idle2.stop();
+  assert.equal(page2.count(), 0);
+}
 console.log("ok");

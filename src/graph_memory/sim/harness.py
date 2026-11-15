@@ -222,9 +222,9 @@ _REAL_EMBEDDER: Embedder | None = None
 def real_embedder() -> Embedder:
     global _REAL_EMBEDDER
     if _REAL_EMBEDDER is None:
-        from ..vectors import chroma_default_embedder
+        from ..embedding import default_embedder
 
-        _REAL_EMBEDDER = chroma_default_embedder()
+        _REAL_EMBEDDER = default_embedder()
         _REAL_EMBEDDER("warm up")
     return _REAL_EMBEDDER
 
@@ -474,6 +474,36 @@ class Simulator:
                     f"{'ok  ' if out.ok else 'FAIL'} #{n} {out.kind} {out.label} {out.detail}"[:200]
                 )
             self.settle()
+            if self.daemon is not None:  # the recall index missed no change
+                diff = self.daemon.kindex.differences()
+                self.outcomes.append(
+                    Outcome(
+                        len(self.outcomes) + 1,
+                        "assert",
+                        "the recall index matches a rebuild",
+                        not diff,
+                        ", ".join(diff)[:300],
+                    )
+                )
+                # ... and what is on disk is what the daemon holds: no change went unsaved
+                from ..knowledge import KnowledgeStore
+                from ..storage import differences
+
+                self.daemon.knowledge.save()
+                disk = KnowledgeStore(self.cfg.home)
+                try:
+                    diff = differences(self.daemon.knowledge, disk)
+                finally:
+                    disk.close()
+                self.outcomes.append(
+                    Outcome(
+                        len(self.outcomes) + 1,
+                        "assert",
+                        "memory on disk matches the daemon's",
+                        not diff,
+                        ", ".join(diff)[:300],
+                    )
+                )
             return self._report()
         finally:
             self._teardown()

@@ -81,7 +81,10 @@ def test_graduation_records_sources_and_reinforcing_adds_one(tmp_path: Path) -> 
 
 
 def test_items_from_before_sources_get_them_from_their_segments(tmp_path: Path) -> None:
-    k = KnowledgeStore(tmp_path, topic_embed)
+    from graph_memory.storage import JsonBackend
+
+    # such items only exist in the JSON files written before sources (and before SQLite)
+    k = KnowledgeStore(tmp_path, topic_embed, backend=JsonBackend(tmp_path))
     graduate(
         k,
         SegmentInput("s1", (Exchange("x1", T0, "add a lock", "done"),), "session_end"),
@@ -93,7 +96,8 @@ def test_items_from_before_sources_get_them_from_their_segments(tmp_path: Path) 
     for i in data["items"]:
         i.pop("sources")  # as written before this change
     (tmp_path / "knowledge.json").write_text(json.dumps(data))
-    again = KnowledgeStore(tmp_path, topic_embed)
+    again = KnowledgeStore(tmp_path, topic_embed)  # finds the JSON files: reads them
+    assert again.backend.name == "json"
     (seg,) = again.segments.values()
     for it in again.items.values():
         assert [(s.session, s.until) for s in it.sources] == [("s1", seg.end)]

@@ -1,4 +1,5 @@
-"""`gm migrate`: from the conversation graph to knowledge-only memory, once.
+"""`gm migrate`: from the conversation graph to knowledge-only memory, and from the JSON
+files to memory.db (SQLite), each once.
 
 Before: every exchange kept for good in a conversation graph (`nodes/`, `graph.json`,
 `chroma/`), plus the knowledge graph. After: the knowledge graph only, and a buffer for
@@ -12,6 +13,10 @@ exchanges not yet graduated.
     3. the old files, and knowledge.json as it was, are packed into
        archive-<date>.tar.gz, which is checked before anything is deleted
     4. the old files are deleted
+
+Then, for a memory still in the JSON files: memory.db is built beside them, checked to
+hold the same memory (every row and vector, and the nearest notes for 50 of them), the
+JSON files are packed into archive-<date>-json.tar.gz, and only then memory.db takes over.
 
 Run it with the daemon stopped. `--dry-run` shows the plan and changes nothing.
 """
@@ -31,6 +36,15 @@ from . import clock
 from .anchors import CodeAnchor, SourceRef
 from .buffer import Exchange, SessionBuffer
 from .knowledge import KNOWLEDGE_FILE, KnowledgeStore
+from .storage import (
+    DB_FILE,
+    JSON_FILES,
+    JsonBackend,
+    SqliteBackend,
+    copy_memory,
+    differences,
+    sqlite_problem,
+)
 
 OLD_FILES = ("nodes", "graph.json", "chroma")
 CONTENT_MARKER = "<!-- gme:content -->"
@@ -95,7 +109,7 @@ def _when(v: Any) -> datetime:
 
 
 def plan(home: Path) -> Plan:
-    p = Plan(home, archive=home / f"archive-{clock.now().date().isoformat()}.tar.gz")
+    p = Plan(home, archive=home / f"archive-{clock.now().astimezone().date().isoformat()}.tar.gz")
     if not p.needed:
         return p
     p.old_bytes = sum(_size(home / f) for f in OLD_FILES if (home / f).exists())
@@ -193,7 +207,7 @@ def apply(p: Plan) -> dict[str, Any]:
     os.replace(tmp, p.archive)
     # 3. knowledge in the new format (loading fills the sources from the segments)
     if (home / KNOWLEDGE_FILE).exists():
-        KnowledgeStore(home).save()
+        KnowledgeStore(home, backend=JsonBackend(home)).save()
     # 4. the old files go
     for f in members:
         target = home / f
@@ -207,4 +221,105 @@ def apply(p: Plan) -> dict[str, Any]:
         "archive": str(p.archive),
         "archive_bytes": p.archive.stat().st_size,
         "removed": members,
+    }
+
+
+# ---------------------------------------------------------------------------- to SQLite
+
+
+@dataclass
+class SqlitePlan:
+    """Moving knowledge from the JSON files into memory.db."""
+
+    home: Path
+    counts: dict[str, int] = field(default_factory=dict)
+    json_bytes: int = 0
+    problem: str | None = None
+    archive: Path | None = None
+
+    @property
+    def needed(self) -> bool:
+        return (self.home / KNOWLEDGE_FILE).exists() and not (self.home / DB_FILE).exists()
+
+    def text(self) -> str:
+        if not self.needed:
+            return "Storage: already in " + str(self.home / DB_FILE)
+        c = self.counts
+        lines = [
+            f"Knowledge in JSON files in {self.home} ({self.json_bytes / 1e6:.1f} MB): "
+            f"{c.get('items', 0)} items, {c.get('entities', 0)} entities, "
+            f"{c.get('edges', 0)} edges, {c.get('segments', 0)} graduations, "
+            f"{c.get('vectors', 0)} vectors, {c.get('deletions', 0)} deletions, "
+            f"{c.get('summaries', 0)} summaries",
+            f"  -> moved into {self.home / DB_FILE}, checked against the JSON files first",
+            f"  -> the JSON files packed into {self.archive}, then removed",
+        ]
+        if self.problem:
+            lines.append(f"Cannot move it with this Python: {self.problem}")
+        return "\n".join(lines)
+
+
+def sqlite_plan(home: Path) -> SqlitePlan:
+    today = clock.now().astimezone().date().isoformat()  # the user's day, not UTC's
+    p = SqlitePlan(home, archive=home / f"archive-{today}-json.tar.gz")
+    if not p.needed:
+        return p
+    p.problem = sqlite_problem()
+    p.json_bytes = sum((home / f).stat().st_size for f in JSON_FILES if (home / f).exists())
+    store = KnowledgeStore(home, backend=JsonBackend(home))
+    p.counts = {
+        "items": len(store.items),
+        "entities": len(store.entities),
+        "edges": len(store.edges),
+        "segments": len(store.segments),
+        "vectors": sum(store.vectors.get(i) is not None for i in [*store.items, *store.entities]),
+        "deletions": len(store.deleted()),
+        "summaries": len(store.summaries()),
+    }
+    return p
+
+
+def sqlite_apply(p: SqlitePlan) -> dict[str, Any]:
+    """Build memory.db beside the JSON files, check it holds the same memory, archive the
+    JSON files, and only then switch. Any difference leaves the JSON files as they were."""
+    home = p.home
+    if not p.needed:
+        return {"migrated": False}
+    if p.problem:
+        raise RuntimeError(p.problem)
+    assert p.archive is not None
+    new = home / (DB_FILE + ".new")
+    for leftover in (new, new.with_name(new.name + "-wal"), new.with_name(new.name + "-shm")):
+        leftover.unlink(missing_ok=True)  # from a run that stopped part way
+    src = KnowledgeStore(home, backend=JsonBackend(home))
+    dst = KnowledgeStore(home, backend=SqliteBackend(new))
+    counts = copy_memory(src, dst)
+    dst.close()
+    check = KnowledgeStore(home, backend=SqliteBackend(new))
+    diff = differences(src, check)
+    check.close()
+    if diff:
+        new.unlink(missing_ok=True)
+        raise RuntimeError("the new memory.db differs from the JSON files: " + "; ".join(diff))
+    # archive the JSON files and check the archive before anything is removed
+    files = [f for f in JSON_FILES if (home / f).exists()]
+    tmp = p.archive.with_name(p.archive.name + ".tmp")
+    with tarfile.open(tmp, "w:gz") as tar:
+        for f in files:
+            tar.add(home / f, arcname=f)
+    with tarfile.open(tmp, "r:gz") as tar:
+        if set(tar.getnames()) != set(files):
+            tmp.unlink()
+            new.unlink(missing_ok=True)
+            raise RuntimeError("archive check failed")
+    os.replace(tmp, p.archive)
+    os.replace(new, home / DB_FILE)  # from here on, memory.db is the memory
+    for f in files:
+        (home / f).unlink()
+    return {
+        "migrated": True,
+        **counts,
+        "archive": str(p.archive),
+        "archive_bytes": p.archive.stat().st_size,
+        "removed": files,
     }

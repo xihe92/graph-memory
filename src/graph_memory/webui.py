@@ -43,6 +43,9 @@ _STATIC = {
     "/kview.js": ("kview.js", "text/javascript"),
     "/idle.js": ("idle.js", "text/javascript"),
     "/vendor/3d-force-graph.min.js": ("vendor/3d-force-graph.min.js", "text/javascript"),
+    "/vendor/force-graph.min.js": ("vendor/force-graph.min.js", "text/javascript"),
+    "/layout.js": ("layout.js", "text/javascript"),
+    "/vendor/d3-force-3d.bundle.js": ("vendor/d3-force-3d.bundle.js", "text/javascript"),
 }
 
 
@@ -171,7 +174,9 @@ class _Handler(BaseHTTPRequestHandler):
                 params["since"] = int(q["since"])
             self._daemon("sessions", params, passive=poll)
         elif route == "knowledge":
-            self._daemon("knowledge")
+            self._daemon("knowledge", {"lean": True})
+        elif route == "ksearch":
+            self._daemon("knowledge_search", {"q": q.get("q", "")})
         elif route == "kitem":
             self._daemon("knowledge_item", {"id": q.get("id", "")})
         elif route == "kreview":

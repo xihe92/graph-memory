@@ -3,7 +3,7 @@ GM_SOCKET the socket path and GM_UI_PORT the web page's port.
 
 Example config.toml:
 
-    embedder = "chroma-default"      # or "none", or "package.module:factory"
+    embedder = "all-MiniLM-L6-v2"    # or "none", or "package.module:factory"
     model_backend = "claude-code"    # the model graduation uses: "claude-code",
                                      # "command" (model_command) or "none"
     model = "haiku"
@@ -34,7 +34,7 @@ log = logging.getLogger(__name__)
 class Config:
     home: Path
     socket_path: Path
-    embedder: str = "chroma-default"
+    embedder: str = "all-MiniLM-L6-v2"
     # the model graduation and note judging call
     model_backend: str = "claude-code"
     model: str = "haiku"

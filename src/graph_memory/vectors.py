@@ -8,9 +8,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import json
-import math
 import os
-import struct
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
@@ -29,7 +27,11 @@ class VectorIndex(Protocol):
     metadata equals every given value; `where_not` drops entries matching any of them."""
 
     def upsert(
-        self, node_id: str, vector: Sequence[float], metadata: Metadata | None = None
+        self,
+        node_id: str,
+        vector: Sequence[float],
+        metadata: Metadata | None = None,
+        unit: bool = False,
     ) -> None: ...
     def get(self, node_id: str) -> list[float] | None: ...
     def remove(self, node_id: str) -> None: ...
@@ -41,16 +43,22 @@ class VectorIndex(Protocol):
         where: Metadata | None = None,
         where_not: Metadata | None = None,
         among: set[str] | None = None,
+        scopes: Sequence[str] | None = None,
     ) -> list[tuple[str, float]]: ...
+    def set_meta(self, meta: Mapping[str, tuple[str, bool]]) -> None: ...
     def save(self) -> None: ...
 
 
-def _unit(v: Sequence[float]) -> list[float]:
-    vec = [float(x) for x in v]
-    norm = math.sqrt(sum(x * x for x in vec))
+Vec32 = np.ndarray[Any, np.dtype[np.float32]]
+
+
+def _unit(v: Sequence[float] | Vec32) -> Vec32:
+    vec = np.asarray(v, dtype=np.float32)
+    norm = float(np.linalg.norm(vec))
     if norm == 0.0:
         raise ValueError("zero vector cannot be indexed")
-    return [x / norm for x in vec]
+    out: Vec32 = vec / np.float32(norm)
+    return out
 
 
 def _meta_matches(meta: Metadata, where: Metadata | None, where_not: Metadata | None) -> bool:
@@ -67,52 +75,87 @@ def _meta_matches(meta: Metadata, where: Metadata | None, where_not: Metadata | 
 ENCODING = "f32-base64"
 
 
-def _encode(v: Sequence[float]) -> str:
-    return base64.b64encode(struct.pack(f"<{len(v)}f", *v)).decode("ascii")
+def _encode(v: Vec32) -> str:
+    return base64.b64encode(np.asarray(v, dtype="<f4").tobytes()).decode("ascii")
 
 
-def _decode(v: str | Sequence[float]) -> list[float]:
+def _decode(v: str | Sequence[float]) -> Vec32:
     if isinstance(v, str):
-        raw = base64.b64decode(v)
-        return list(struct.unpack(f"<{len(raw) // 4}f", raw))
-    return [float(x) for x in v]
+        out: Vec32 = np.frombuffer(base64.b64decode(v), dtype="<f4").astype(np.float32)
+        return out
+    return np.asarray([float(x) for x in v], dtype=np.float32)
 
 
 class JsonVectorIndex:
-    """Exact cosine index in one JSON file, searched as one matrix multiplication:
-    under a millisecond for tens of thousands of nodes."""
+    """Exact cosine index in one JSON file. Every vector is one row of a single float32
+    array (4 bytes a number, no second copy), so a query is one multiplication over the
+    rows it may consider."""
 
     def __init__(self, path: Path) -> None:
         self.path = path
         self._dim: int | None = None
-        self._vectors: dict[str, list[float]] = {}
+        self._ids: list[str] = []  # row -> id
+        self._row: dict[str, int] = {}  # id -> row
+        self._mat: Vec32 = np.zeros((0, 0), dtype=np.float32)  # rows past len(_ids) unused
         self._meta: dict[str, dict[str, str]] = {}
-        self._matrix: tuple[list[str], Any] | None = None  # see _table()
         if path.exists():
             data = json.loads(path.read_text(encoding="utf-8"))
-            self._dim = data.get("dim")
-            self._vectors = {k: _decode(v) for k, v in data["vectors"].items()}
-            self._meta = {k: dict(v) for k, v in data.get("meta", {}).items()}
+            meta = data.get("meta", {})
+            for k, v in data["vectors"].items():  # stored at unit length already
+                self._put(k, _decode(v), meta.get(k))
+
+    def __len__(self) -> int:
+        return len(self._ids)
 
     def upsert(
-        self, node_id: str, vector: Sequence[float], metadata: Metadata | None = None
+        self,
+        node_id: str,
+        vector: Sequence[float] | Vec32,
+        metadata: Metadata | None = None,
+        unit: bool = False,
     ) -> None:
-        v = _unit(vector)
+        """`unit`: the vector is already scaled to length 1 (one read from storage): kept
+        exactly as given."""
+        v = np.asarray(vector, dtype=np.float32) if unit else _unit(vector)
+        self._put(node_id, v, metadata)
+
+    def _put(self, node_id: str, v: Vec32, metadata: Metadata | None) -> None:
         if self._dim is None:
             self._dim = len(v)
+            self._mat = np.zeros((16, self._dim), dtype=np.float32)
         elif len(v) != self._dim:
             raise ValueError(f"vector dim {len(v)} != index dim {self._dim}")
-        self._vectors[node_id] = v
-        self._meta[node_id] = dict(metadata or {})
-        self._matrix = None
+        row = self._row.get(node_id)
+        if row is None:
+            row = len(self._ids)
+            if row == len(self._mat):  # full: double the room
+                grown = np.zeros((2 * len(self._mat), self._dim), dtype=np.float32)
+                grown[:row] = self._mat[:row]
+                self._mat = grown
+            self._ids.append(node_id)
+            self._row[node_id] = row
+        self._mat[row] = v
+        # the kind only: a search here is limited by `among`, so a scope kept beside the
+        # vector would only go stale in the file
+        kind = (metadata or {}).get("kind")
+        self._meta[node_id] = {"kind": kind} if kind is not None else {}
 
     def get(self, node_id: str) -> list[float] | None:
-        return self._vectors.get(node_id)
+        row = self._row.get(node_id)
+        return None if row is None else [float(x) for x in self._mat[row]]
 
     def remove(self, node_id: str) -> None:
-        self._vectors.pop(node_id, None)
+        row = self._row.pop(node_id, None)
         self._meta.pop(node_id, None)
-        self._matrix = None
+        if row is None:
+            return
+        last = len(self._ids) - 1
+        if row != last:  # the last row fills the hole
+            moved = self._ids[last]
+            self._mat[row] = self._mat[last]
+            self._ids[row] = moved
+            self._row[moved] = row
+        self._ids.pop()
 
     def query(
         self,
@@ -122,54 +165,206 @@ class JsonVectorIndex:
         where: Metadata | None = None,
         where_not: Metadata | None = None,
         among: set[str] | None = None,
+        scopes: Sequence[str] | None = None,
     ) -> list[tuple[str, float]]:
-        if not self._vectors or k <= 0:
+        if not self._ids or k <= 0:
             return []
-        ids, matrix = self._table()
-        scores = matrix @ np.asarray(_unit(vector), dtype=np.float64)
+        ids = self._ids
+        # the rows to consider: only the given ids when a set is given, so a search
+        # limited to a scope does not walk every vector
+        pool = (
+            sorted(self._row[i] for i in among if i in self._row)
+            if among is not None
+            else range(len(ids))
+        )
         keep = [
             n
-            for n, nid in enumerate(ids)
-            if nid not in exclude
-            and (among is None or nid in among)
-            and _meta_matches(self._meta.get(nid, {}), where, where_not)
+            for n in pool
+            if ids[n] not in exclude and _meta_matches(self._meta.get(ids[n], {}), where, where_not)
         ]
         if not keep:
             return []
         rows = np.asarray(keep)
-        kept = scores[rows]
+        kept = self._mat[rows] @ _unit(vector)
         top = np.argsort(-kept, kind="stable")[:k]
         return [(ids[int(rows[t])], float(kept[t])) for t in top]
 
-    def _table(self) -> tuple[list[str], Any]:
-        """Every vector as one row of a matrix, so a query is one multiplication.
-        Built on the first query after a change."""
-        if self._matrix is None:
-            ids = list(self._vectors)
-            self._matrix = (ids, np.asarray([self._vectors[i] for i in ids], dtype=np.float64))
-        return self._matrix
+    def set_meta(self, meta: Mapping[str, tuple[str, bool]]) -> None:
+        pass  # this index limits a search by `among`, which says the same
 
     def save(self) -> None:
         payload = {
             "dim": self._dim,
             "encoding": ENCODING,
-            "vectors": {k: _encode(v) for k, v in self._vectors.items()},
+            "vectors": {i: _encode(self._mat[n]) for n, i in enumerate(self._ids)},
             "meta": self._meta,
         }
         atomic_write(self.path, json.dumps(payload))
 
 
-def chroma_default_embedder() -> Embedder:
-    """Chroma's built-in local model (all-MiniLM-L6-v2, ONNX, 384 dims). Downloads ~80 MB
-    to ~/.cache/chroma on first use, then runs offline on CPU (~40 ms per text)."""
-    from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+KNN_MAX = 4096  # the most rows sqlite-vec returns from one nearest-neighbour query
 
-    ef = DefaultEmbeddingFunction()
 
-    def embed(text: str) -> list[float]:
-        return [float(x) for x in ef([text])[0]]
+class SqliteVectorIndex:
+    """Vectors in memory.db, searched in place by sqlite-vec (an exact cosine scan, done
+    in C by SQLite): nothing is held in Python's memory. Writes go into the backend's
+    open transaction, so they reach disk with the save that commits the notes."""
 
-    return embed
+    TABLE = "vec"
+
+    def __init__(self, conn: Any, begin: Callable[[], None]) -> None:
+        self.conn = conn
+        self.begin = begin
+        row = conn.execute("SELECT value FROM meta WHERE key = 'dim'").fetchone()
+        self._dim: int | None = int(row[0]) if row else None
+        self._counts: dict[str, int] | None = None  # rows per kind, see _count()
+
+    def __len__(self) -> int:
+        return sum(self._count().values())
+
+    def _ensure(self, dim: int) -> None:
+        if self._dim is None:
+            self.begin()
+            # beside each vector: what it is, and for an item its scope and whether it can
+            # be recalled now, so a search for a session filters inside the scan
+            self.conn.execute(
+                f"CREATE VIRTUAL TABLE IF NOT EXISTS {self.TABLE} USING vec0("
+                f"id TEXT PRIMARY KEY, kind TEXT, scope TEXT, live INTEGER,"
+                f" embedding float[{dim}] distance_metric=cosine)"
+            )
+            self.conn.execute("INSERT OR REPLACE INTO meta VALUES ('dim', ?)", (str(dim),))
+            self._dim = dim
+        elif dim != self._dim:
+            raise ValueError(f"vector dim {dim} != index dim {self._dim}")
+
+    def _count(self) -> dict[str, int]:
+        if self._counts is None:
+            self._counts = (
+                dict(self.conn.execute(f"SELECT kind, count(*) FROM {self.TABLE} GROUP BY kind"))
+                if self._dim is not None
+                else {}
+            )
+        return self._counts
+
+    def upsert(
+        self,
+        node_id: str,
+        vector: Sequence[float] | Vec32,
+        metadata: Metadata | None = None,
+        unit: bool = False,
+    ) -> None:
+        v = np.asarray(vector, dtype=np.float32) if unit else _unit(vector)
+        self._ensure(len(v))
+        self.begin()
+        self.conn.execute(f"DELETE FROM {self.TABLE} WHERE id = ?", (node_id,))
+        meta = metadata or {}
+        self.conn.execute(
+            f"INSERT INTO {self.TABLE}(id, kind, scope, live, embedding) VALUES (?, ?, ?, ?, ?)",
+            (
+                node_id,
+                meta.get("kind", ""),
+                meta.get("scope", ""),
+                int(str(meta.get("live", "1")) == "1"),
+                np.asarray(v, dtype="<f4").tobytes(),
+            ),
+        )
+        self._counts = None
+
+    def set_meta(self, meta: Mapping[str, tuple[str, bool]]) -> None:
+        """File items' scope and recallability (id -> (scope, live)) beside their vectors,
+        writing only rows that differ. A few are looked up by id; for many, one scan of
+        the items' rows is quicker."""
+        if self._dim is None or not meta:
+            return
+        if len(meta) <= 64:
+            rows = [
+                (i, *r)
+                for i in meta
+                for r in self.conn.execute(
+                    f"SELECT scope, live FROM {self.TABLE} WHERE id = ?", (i,)
+                ).fetchall()
+            ]
+        else:
+            rows = self.conn.execute(
+                f"SELECT id, scope, live FROM {self.TABLE} WHERE kind = 'item'"
+            ).fetchall()
+        stale = []
+        for i, scope, live in rows:
+            want = meta.get(i)
+            if want is not None and (scope, live) != (want[0], int(want[1])):
+                stale.append((want[0], int(want[1]), i))
+        if stale:
+            self.begin()
+            self.conn.executemany(
+                f"UPDATE {self.TABLE} SET scope = ?, live = ? WHERE id = ?", stale
+            )
+
+    def get(self, node_id: str) -> list[float] | None:
+        if self._dim is None:
+            return None
+        row = self.conn.execute(
+            f"SELECT embedding FROM {self.TABLE} WHERE id = ?", (node_id,)
+        ).fetchone()
+        return None if row is None else [float(x) for x in np.frombuffer(row[0], dtype="<f4")]
+
+    def remove(self, node_id: str) -> None:
+        if self._dim is None:
+            return
+        self.begin()
+        self.conn.execute(f"DELETE FROM {self.TABLE} WHERE id = ?", (node_id,))
+        self._counts = None
+
+    def query(
+        self,
+        vector: Sequence[float],
+        k: int,
+        exclude: frozenset[str] = frozenset(),
+        where: Metadata | None = None,
+        where_not: Metadata | None = None,
+        among: set[str] | None = None,
+        scopes: Sequence[str] | None = None,
+    ) -> list[tuple[str, float]]:
+        """The k nearest, exactly. `scopes` (a recall's) filters inside the scan: items in
+        those scopes that can be recalled now. `among` then keeps only the given ids;
+        when that leaves fewer than k, it asks again for more (sqlite-vec returns at most
+        4096 rows a query)."""
+        if self._dim is None or k <= 0 or (among is not None and not among):
+            return []
+        if where_not or set(where or {}) - {"kind"}:
+            raise ValueError("SqliteVectorIndex filters on kind only")
+        kind = (where or {}).get("kind")
+        counts = self._count()
+        n = counts.get(kind, 0) if kind is not None else sum(counts.values())
+        if not n:
+            return []
+        q = np.asarray(_unit(vector), dtype="<f4").tobytes()
+        sql = f"SELECT id, distance FROM {self.TABLE} WHERE embedding MATCH ? AND k = ?"
+        extra: list[Any] = []
+        if kind is not None:
+            sql += " AND kind = ?"
+            extra.append(kind)
+        if scopes is not None:
+            sql += " AND live = 1 AND scope IN (SELECT value FROM json_each(?))"
+            extra.append(json.dumps(list(scopes)))
+            fetch = k + len(exclude)
+        else:
+            fetch = k + len(exclude) + (max(0, n - len(among)) if among is not None else 0)
+        fetch = min(n, fetch, KNN_MAX)
+        while True:
+            args: list[Any] = [q, fetch, *extra]
+            out = []
+            for nid, dist in self.conn.execute(sql, args):
+                if nid in exclude or (among is not None and nid not in among):
+                    continue
+                out.append((nid, 1.0 - float(dist)))
+                if len(out) == k:
+                    return out
+            if fetch >= min(n, KNN_MAX):  # read all it can: fewer than k qualify
+                return out
+            fetch = min(n, KNN_MAX, fetch * 4)  # some rows were left out: ask for more
+
+    def save(self) -> None:
+        pass  # the backend commits
 
 
 def atomic_write(path: Path, data: str) -> None:

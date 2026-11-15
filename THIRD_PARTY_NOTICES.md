@@ -23,6 +23,16 @@ source file is included. The adapted places are marked with "Graphiti" in
 - Copyright (c) 2017 Vasco Asturiano
 - License: MIT, full text in `LICENSES/MIT-3d-force-graph.txt`
 
-`src/graph_memory/ui/vendor/3d-force-graph.min.js` is the unmodified 1.80.1 UMD bundle
+`src/graph_memory/ui/vendor/3d-force-graph.min.js` is the unmodified 1.80.2 UMD bundle
 from npm. The bundle contains the library's own dependencies (three.js, d3-force-3d and
 others), each under its own permissive license, as published with those packages.
+
+## force-graph
+
+- Source: https://github.com/vasturiano/force-graph
+- Copyright (c) 2018 Vasco Asturiano
+- License: MIT, full text in `LICENSES/MIT-force-graph.txt`
+
+`src/graph_memory/ui/vendor/force-graph.min.js` is the unmodified 1.52.0 UMD bundle from
+npm, the 2D view of the Knowledge page. It bundles d3-force and other d3 modules, each
+under its own permissive license.

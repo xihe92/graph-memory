@@ -20,10 +20,9 @@ T0 = datetime(2026, 11, 1, 10, tzinfo=UTC)
 
 @pytest.fixture(scope="module")
 def embedder():  # type: ignore[no-untyped-def]
-    pytest.importorskip("chromadb")
-    from graph_memory.vectors import chroma_default_embedder
+    from graph_memory.embedding import default_embedder
 
-    return chroma_default_embedder()
+    return default_embedder()
 
 
 def test_recall_by_meaning_with_the_real_embedder(tmp_path: Path, embedder) -> None:  # type: ignore[no-untyped-def]

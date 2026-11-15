@@ -769,6 +769,7 @@ def apply(
         old.applies_to = old.applies_to or it["applies_to"]
         if old.scope == "global" and topic_of(it["scope"]):
             old.scope = it["scope"]  # restated as about one subject: recall it only there
+        store.touch(item_id)  # what it says about itself may have changed: save it
 
     for item_id, it in plan.reinforce:
         store.reinforce(item_id, segment.segment_id, source(it), boost=not again(item_id))
@@ -866,7 +867,7 @@ def apply(
     segment.new = [i for i in ids if store.items[i].segments[:1] == [segment.segment_id]]
     segment.calls = ex.calls
     segment.ms = round((time.perf_counter() - started) * 1000, 1)
-    store.segments[segment.segment_id] = segment
+    store.add_segment(segment)
     return segment
 
 

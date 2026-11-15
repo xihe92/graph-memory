@@ -153,7 +153,7 @@ def test_the_daemon_writes_caches_and_dates_a_summary(cfg: Config) -> None:  # n
         assert "about the project limiter" in ask.prompts[-1]
         assert elsewhere.statement not in ask.prompts[-1]  # only this scope's notes
         # a view, not knowledge: nothing was added to memory
-        assert len(k.items) == 4 and (cfg.home / "summaries.json").exists()
+        assert len(k.items) == 4 and set(k.summaries()) == {REPO}
         (ev,) = _events(cfg, "summarize")
         assert ev["ok"] and (ev["scope"], ev["items"], ev["points"]) == (REPO, 3, 3)
 

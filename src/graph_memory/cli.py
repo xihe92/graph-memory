@@ -13,8 +13,10 @@ import logging
 import os
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
+from . import clock
 from .adapters import load_adapter
 from .client import DaemonUnavailable, RemoteError, call
 from .config import Config, load_config
@@ -174,11 +176,19 @@ def _ui(cfg: Config, args: argparse.Namespace) -> int:
 
 
 def _migrate(cfg: Config, args: argparse.Namespace) -> int:
+    """The moves memory still needs, in order: off the conversation graph, then from the
+    JSON files into memory.db. Each runs once; with --dry-run, only the plans."""
     from . import migrate
 
-    p = migrate.plan(cfg.home)
-    print(p.text())
-    if not p.needed or args.dry_run:
+    old = migrate.plan(cfg.home)
+    print(old.text())
+    if old.needed and args.dry_run:
+        print("Then: the knowledge moves from the JSON files into memory.db (SQLite).")
+        return 0
+    to_db = migrate.sqlite_plan(cfg.home) if not old.needed else None
+    if to_db is not None:
+        print(to_db.text())
+    if args.dry_run or not (old.needed or (to_db is not None and to_db.needed)):
         return 0
     try:
         call(cfg, "ping", autostart=False, timeout=2)
@@ -191,11 +201,52 @@ def _migrate(cfg: Config, args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
-    res = migrate.apply(p)
+    if old.needed:
+        res = migrate.apply(old)
+        print(
+            f"Done: {res['buffered']} exchanges moved to the buffer; archive "
+            f"{res['archive']} ({res['archive_bytes'] / 1e6:.1f} MB); "
+            f"removed {', '.join(res['removed'])}"
+        )
+        to_db = migrate.sqlite_plan(cfg.home)
+        print(to_db.text())
+    if to_db is not None and to_db.needed:
+        try:
+            res = migrate.sqlite_apply(to_db)
+        except RuntimeError as exc:
+            print(f"Not moved, the JSON files are as they were: {exc}", file=sys.stderr)
+            return 1
+        print(
+            f"Done: {res['items']} items, {res['entities']} entities, {res['edges']} edges, "
+            f"{res['vectors']} vectors now in {cfg.home / 'memory.db'}, checked against the "
+            f"JSON files; those are in {res['archive']} "
+            f"({res['archive_bytes'] / 1e6:.1f} MB). `gm export` writes them out again."
+        )
+    return 0
+
+
+def _export(cfg: Config, args: argparse.Namespace) -> int:
+    """Memory written out in the JSON format, into a folder: readable in any editor, and
+    what a version from before SQLite reads."""
+    from .knowledge import KnowledgeStore
+    from .storage import export_json
+
+    dest = (
+        Path(args.dest).expanduser()
+        if args.dest
+        else (Path.home() / f"graph-memory-export-{clock.now().astimezone().date().isoformat()}")
+    )
+    if dest.resolve() == cfg.home.resolve():
+        print("export into another folder than the memory itself", file=sys.stderr)
+        return 2
+    store = KnowledgeStore(cfg.home)  # reading only: fine while the daemon runs
+    try:
+        counts = export_json(store, dest)
+    finally:
+        store.close()
     print(
-        f"Done: {res['buffered']} exchanges moved to the buffer; archive "
-        f"{res['archive']} ({res['archive_bytes'] / 1e6:.1f} MB); "
-        f"removed {', '.join(res['removed'])}"
+        f"Wrote {counts['items']} items, {counts['entities']} entities, {counts['edges']} "
+        f"edges, {counts['vectors']} vectors, {counts['deletions']} deletions to {dest}"
     )
     return 0
 
@@ -203,7 +254,7 @@ def _migrate(cfg: Config, args: argparse.Namespace) -> int:
 def knowledge_items(cfg: Config, *, passive: bool = False) -> dict[str, dict[str, Any]]:
     """Item id -> {type, statement, valid}, from the running daemon; {} without one."""
     try:
-        view = call(cfg, "knowledge", autostart=False, passive=passive)
+        view = call(cfg, "knowledge", {"lean": True}, autostart=False, passive=passive)
     except (DaemonUnavailable, RemoteError):
         return {}
     return {
@@ -640,9 +691,15 @@ def main(argv: list[str] | None = None) -> int:
     up.add_argument("--no-open", action="store_true", help="don't open a browser")
     sub.add_parser("stop", help="stop the daemon")
     mp = sub.add_parser(
-        "migrate", help="move from the conversation graph to knowledge-only memory (once)"
+        "migrate",
+        help="move memory to the current storage: off the conversation graph, then from the "
+        "JSON files into memory.db (each once)",
     )
     mp.add_argument("--dry-run", action="store_true", help="show the plan, change nothing")
+    ep = sub.add_parser(
+        "export", help="write memory out as JSON files (readable; what older versions read)"
+    )
+    ep.add_argument("dest", nargs="?", help="folder (default ~/graph-memory-export-<date>)")
     args = parser.parse_args(argv)
 
     is_hook = args.cmd in ("start", "recall", "remember", "graduate")
@@ -671,6 +728,8 @@ def main(argv: list[str] | None = None) -> int:
         return _stats(cfg, args)
     if args.cmd == "migrate":
         return _migrate(cfg, args)
+    if args.cmd == "export":
+        return _export(cfg, args)
 
     try:
         if args.cmd == "status":

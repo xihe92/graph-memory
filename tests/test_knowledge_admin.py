@@ -347,7 +347,16 @@ def test_web_delete_confirm_review_and_undelete(admin: tuple[Config, Daemon]) ->
         assert status == 200 and daemon.knowledge.items["aaaa2222"].disputes == 0
         status, view = _req(ui, "/api/knowledge", token=ui.token)
         mine = next(i for i in view["items"] if i["id"] == "aaaa2222")
-        assert mine["origin"] == "" and mine["volatility"] == "stable" and not mine["overdue"]
+        assert not mine["overdue"] and mine["disputes"] == 0
+        # the page's list leaves out what only the detail shows; the detail has it
+        assert "why" not in mine and "sources" not in mine and isinstance(view["version"], int)
+        status, detail = _req(ui, "/api/kitem?id=aaaa2222", token=ui.token)
+        assert detail["item"]["origin"] == "" and detail["item"]["volatility"] == "stable"
+        assert detail["version"] == view["version"]
+        # search runs in the daemon: statement, reason, or an entity's name
+        status, hits = _req(ui, "/api/ksearch?q=SHORT%20answers", token=ui.token)
+        assert status == 200 and hits["items"] == ["aaaa2222"] and hits["entities"] == []
+        assert _req(ui, "/api/ksearch?q=", token=ui.token)[1]["items"] == []
         status, err = _req(ui, "/api/kdelete", {"ids": []}, token=ui.token)
         assert status == 400
     finally:

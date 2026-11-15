@@ -11,17 +11,18 @@ license = "MIT"
 license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md", "LICENSES/*"]
 requires-python = ">=3.11"
 dependencies = [
-    "networkx>=3.2",
     "numpy>=1.26",
+    "onnxruntime>=1.17",
     "pydantic>=2.6",
-    "chromadb>=1.0",
+    "sqlite-vec>=0.1.9,<0.2",
+    "tokenizers>=0.15",
 ]
 
 [project.scripts]
 gm = "graph_memory.cli:main"
 
 [dependency-groups]
-dev = ["pytest>=8", "mypy>=1.10", "ruff>=0.5", "types-networkx"]
+dev = ["pytest>=8", "mypy>=1.10", "ruff>=0.5"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/graph_memory"]
@@ -35,6 +36,10 @@ select = ["E", "F", "B", "UP", "I"]
 [tool.mypy]
 strict = true
 files = ["src"]
+
+[[tool.mypy.overrides]]
+module = ["sqlite_vec"]  # ships without type information
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

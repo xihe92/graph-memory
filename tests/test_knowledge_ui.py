@@ -27,6 +27,14 @@ def test_filter_logic() -> None:
     assert _node(str(tests), str(UI.joinpath("kview.js"))).strip() == "ok"
 
 
+def test_layout_worker_runs_the_force_layout() -> None:
+    tests = Path(__file__).with_name("layout.test.js")
+    out = _node(
+        str(tests), str(UI.joinpath("layout.js")), str(UI.joinpath("vendor/d3-force-3d.bundle.js"))
+    )
+    assert out.strip() == "ok"
+
+
 def test_graph_stops_drawing_while_nothing_moves() -> None:
     tests = Path(__file__).with_name("idle.test.js")
     assert _node(str(tests), str(UI.joinpath("idle.js"))).strip() == "ok"

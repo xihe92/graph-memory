@@ -6,9 +6,10 @@ only the knowledge is kept for good, and recall reads only the knowledge.
 
 from .anchors import Access, CodeAnchor, SourceRef
 from .buffer import Exchange, SessionBuffer, Summary
+from .embedding import LocalEmbedder, default_embedder
 from .knowledge import Entity, Item, ItemType, KnowledgeStore, Relation, Source
 from .models import CommandModel, claude_code_model
-from .vectors import Embedder, JsonVectorIndex, chroma_default_embedder
+from .vectors import Embedder, JsonVectorIndex
 
 __all__ = [
     "Access",
@@ -26,6 +27,7 @@ __all__ = [
     "Source",
     "SourceRef",
     "Summary",
-    "chroma_default_embedder",
+    "default_embedder",
+    "LocalEmbedder",
     "claude_code_model",
 ]
