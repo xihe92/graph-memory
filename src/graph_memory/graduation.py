@@ -554,9 +554,11 @@ def known_entities(store: KnowledgeStore, seg: SegmentInput) -> list[str]:
     """Entity names to offer the extractor so it reuses them: those named in the segment's
     text, then the most mentioned. Cheap: a substring scan, no embedding."""
     text = " ".join(f"{x.prompt} {x.reply} {' '.join(x.files)}" for x in seg.exchanges).lower()
-    named = [e for e in store.entities.values() if normalize_name(e.name) in text]
-    rest = sorted((e for e in store.entities.values() if e not in named), key=lambda e: -e.mentions)
-    return [e.name for e in [*named, *rest][:ENTITY_HINTS]]
+    names = store.names
+    named = [i for i, e in names.items() if normalize_name(e.name) in text]
+    hit = set(named)
+    rest = sorted((i for i in names if i not in hit), key=lambda i: -names[i].mentions)
+    return [names[i].name for i in [*named, *rest][:ENTITY_HINTS]]
 
 
 def known_topics(store: KnowledgeStore) -> list[str]:
@@ -587,7 +589,8 @@ def plan_merge(store: KnowledgeStore, seg: SegmentInput, ex: Extracted) -> Merge
     history = seg.trigger == "rebuild"
 
     def candidate(i: str) -> bool:
-        return i in store.items and (store.items[i].valid or history)
+        h = store.heads.get(i)
+        return h is not None and (h.valid or history)
 
     for norm, e in ex.entities.items():
         hit = store.entity_by_name(e["name"])
@@ -620,8 +623,8 @@ def plan_merge(store: KnowledgeStore, seg: SegmentInput, ex: Extracted) -> Merge
         for i, s in store.similar(it.get("vector"), "item", ITEM_CANDIDATES * 2, ITEM_MIN_SIM):
             if candidate(i):
                 local[i] = s
-        for other in store.items_about(ids, include_invalid=history):
-            local.setdefault(other.item_id, 0.4)
+        for other in store.about(ids, include_invalid=history):
+            local.setdefault(other, 0.4)
         for i, s in sorted(local.items(), key=lambda t: -t[1])[: ITEM_CANDIDATES + 4]:
             chosen[i] = max(chosen.get(i, 0.0), s)
     plan.existing = [i for i, _ in sorted(chosen.items(), key=lambda t: -t[1])[:MAX_EXISTING]]
@@ -648,9 +651,9 @@ def build_merge_prompt(store: KnowledgeStore, plan: MergePlan) -> str:
             line += f" (DISPUTED: {k.dispute_reason or 'a reply contradicted it'})"
         return line
 
+    items = {it.item_id: it for it in store.get_items(plan.existing)}
     existing = (
-        "\n".join(f"K{i + 1} {known(store.items[k])}" for i, k in enumerate(plan.existing))
-        or "(none)"
+        "\n".join(f"K{i + 1} {known(items[k])}" for i, k in enumerate(plan.existing)) or "(none)"
     )
     entity_block = entity_field = ""
     if plan.questions:
@@ -658,7 +661,8 @@ def build_merge_prompt(store: KnowledgeStore, plan: MergePlan) -> str:
         for qi, (norm, cands) in enumerate(plan.questions):
             e = plan.ex.entities[norm]
             opts = "; ".join(
-                f"C{ci + 1}: {store.entity_text(store.entities[c])}" for ci, c in enumerate(cands)
+                f"C{ci + 1}: {store.entity_text(e)}"
+                for ci, e in enumerate(store.get_entities(cands))
             )
             qs.append(f"Q{qi + 1}: {e['name']} ({e['kind'].value}): {e['summary']} — {opts}")
         entity_block = ENTITY_BLOCK.format(questions="\n".join(qs))
@@ -753,7 +757,7 @@ class _Writes:
                 continue
             norm, cands = plan.questions[q]
             c = _ref(ans.get("same_as"), "C", len(cands))
-            if c is not None and cands[c] in store.entities:
+            if c is not None and cands[c] in store.names:
                 plan.entity_ids[norm] = cands[c]
         for norm, e in plan.ex.entities.items():
             if norm in plan.entity_ids:
@@ -792,7 +796,7 @@ class _Writes:
         for n, it in enumerate(plan.new_items):
             d = decisions.get(n, {})
             k = _ref(d.get("duplicate_of"), "K", len(plan.existing))
-            if k is not None and plan.existing[k] in store.items:
+            if k is not None and store.has(plan.existing[k]):
                 store.reinforce(
                     plan.existing[k],
                     segment.segment_id,
@@ -852,10 +856,9 @@ class _Writes:
             if not isinstance(inv, dict):
                 continue
             k = _ref(inv.get("id"), "K", len(plan.existing))
-            if k is not None and plan.existing[k] in store.items:
-                store.invalidate(
-                    plan.existing[k], store.items[me], str(inv.get("reason") or "")[:300]
-                )
+            new = store.item(me)
+            if k is not None and store.has(plan.existing[k]) and new is not None:
+                store.invalidate(plan.existing[k], new, str(inv.get("reason") or "")[:300])
 
     def _related(self, me: str, d: dict[str, Any], created: dict[int, str]) -> None:
         store, plan = self.store, self.plan
@@ -874,16 +877,17 @@ class _Writes:
             if target is None:
                 o = _ref(rel.get("id"), "N", len(plan.new_items))
                 target = created.get(o) if o is not None else None
-            if target is not None and target in store.items:
+            if target is not None and store.has(target):
                 store.add_edge(me, target, relation, weight)
 
     def co_occurrence(self) -> None:
         """Learned in the same segment and about a shared, specific entity: linked."""
         store = self.store
         ids = list(dict.fromkeys(self.segment.items))
+        heads = store.heads
         for a_i, a in enumerate(ids):
             for b in ids[a_i + 1 :]:
-                ia, ib = store.items[a], store.items[b]
+                ia, ib = heads[a], heads[b]
                 if any(not store.hub(e) for e in set(ia.entities) & set(ib.entities)):
                     store.add_edge(a, b, Relation.CO_OCCURS, CO_OCCUR_WEIGHT, "cooccur")
         self.segment.items = ids
@@ -892,7 +896,8 @@ class _Writes:
         """The segment record, with what it taught, stored."""
         store, segment = self.store, self.segment
         ids = segment.items
-        segment.new = [i for i in ids if store.items[i].segments[:1] == [segment.segment_id]]
+        first = {it.item_id: it.segments[:1] for it in store.get_items(ids)}
+        segment.new = [i for i in ids if first.get(i) == [segment.segment_id]]
         segment.calls = self.plan.ex.calls
         segment.ms = round((time.perf_counter() - started) * 1000, 1)
         store.add_segment(segment)
@@ -916,14 +921,14 @@ class _Writes:
     def _again(self, item_id: str) -> bool:
         """A rebuild reads a session's turns a second time: what that session already
         taught is the same evidence, not a new statement of it."""
-        return self.seg.trigger == "rebuild" and any(
-            s.session == self.seg.session for s in self.store.items[item_id].sources
+        return (
+            self.seg.trigger == "rebuild" and self.seg.session in self.store.heads[item_id].sessions
         )
 
     def _provenance(self, item_id: str, it: dict[str, Any]) -> None:
         """A restatement from a better source (docs over the assistant's word) upgrades
         where the item is said to come from."""
-        old = self.store.items[item_id]
+        old = self.store.edit(item_id)
         if TRUST[it["origin"]] > TRUST[old.origin]:
             old.origin = it["origin"]
             old.ref = it["ref"] or old.ref

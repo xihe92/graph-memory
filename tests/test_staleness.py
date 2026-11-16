@@ -50,8 +50,11 @@ def test_old_items_load_as_stable_with_no_origin(tmp_path: Path) -> None:
             }
         )
     )
-    it = KnowledgeStore(tmp_path).items["a"]
-    assert it.origin is Origin.UNKNOWN and it.volatility is Volatility.STABLE
+    from graph_memory import migrate
+
+    migrate.sqlite_apply(migrate.sqlite_plan(tmp_path))
+    it = KnowledgeStore(tmp_path).item("a")
+    assert it is not None and it.origin is Origin.UNKNOWN and it.volatility is Volatility.STABLE
     assert it.review_due() is None and not it.overdue() and it.recallable
 
 
@@ -115,7 +118,7 @@ def test_provenance_survives_a_save(tmp_path: Path) -> None:
     )
     k.dispute(it.item_id, "maybe not")
     k.save()
-    again = KnowledgeStore(tmp_path).items[it.item_id]
+    again = KnowledgeStore(tmp_path).item(it.item_id)
     assert (again.origin, again.ref, again.applies_to, again.volatility) == (
         Origin.DOCS,
         "https://www.sqlite.org/foreignkeys.html",
@@ -136,4 +139,4 @@ def test_a_dormant_item_stays_dormant_when_memory_loads(tmp_path: Path) -> None:
     k.touch(asleep.item_id)
     k.save()
     k.close()
-    assert KnowledgeStore(tmp_path).items[asleep.item_id].area is Area.DORMANT
+    assert KnowledgeStore(tmp_path).item(asleep.item_id).area is Area.DORMANT

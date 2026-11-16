@@ -238,7 +238,7 @@ def compaction() -> Scenario:
 
 
 def _segments_cover_once(sim: Simulator) -> str | None:
-    segs = list(sim.store.segments.values())
+    segs = sim.store.segments()
     triggers = [sg.trigger for sg in segs]
     if triggers != ["compact", "compact", "session_end"]:
         return f"segments by trigger {triggers}"
@@ -325,7 +325,7 @@ def supersede() -> Scenario:
 def _supersedes_edge(sim: Simulator) -> str | None:
     (lua,) = sim.items("lua")
     (lock,) = sim.items("lock")
-    for e in sim.store.edges.values():
+    for e in sim.store.scan_edges():
         if (
             e.relation.value == "supersedes"
             and e.source == lua.item_id
@@ -436,7 +436,7 @@ def _co_used(at_least: float) -> Callable[[Simulator], str | None]:
         # the first item stating each fact; a real model may learn related ones later
         lock = sim.items("lock", valid_only=True)[0]
         skew = sim.items("skew", valid_only=True)[0]
-        for e in sim.store.edges.values():
+        for e in sim.store.scan_edges():
             if e.relation.value == "co_used" and {e.source, e.target} == {
                 lock.item_id,
                 skew.item_id,

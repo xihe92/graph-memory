@@ -121,15 +121,15 @@ def test_graduation_builds_entities_items_and_edges(tmp_path: Path) -> None:
     s = graduate(k, seg(("add a lock", "done"), ("add retries", "done")), ask, topic_embed)
 
     assert len(ask.prompts) == 2  # one extraction; one merge for the two new items
-    assert {e.name for e in k.entities.values()} == {"svc/limiter.py", "Redis"}
-    items = sorted(k.items.values(), key=lambda i: i.statement)
+    assert {e.name for e in k.scan_entities()} == {"svc/limiter.py", "Redis"}
+    items = sorted(k.scan(), key=lambda i: i.statement)
     assert [i.type for i in items] == [ItemType.PROCEDURE, ItemType.DECISION]
     lock = items[1]
     assert lock.scope == "repo:/w/limiter" and lock.why == "workers raced on the counter"
     assert lock.valid_at == T0 and [s.until for s in lock.sources] == [T0]
-    assert s.items == [i.item_id for i in k.items.values()] and s.calls == 2
+    assert s.items == [i.item_id for i in k.scan()] and s.calls == 2
     # learned together and both about svc/limiter.py: a co-occurrence edge, no model needed
-    (edge,) = k.edges.values()
+    (edge,) = k.scan_edges()
     assert edge.relation is Relation.CO_OCCURS and edge.origin == "cooccur"
     assert s.exchanges == 2 and (s.start, s.end) == (T0, T0 + timedelta(minutes=1))
 
@@ -137,8 +137,8 @@ def test_graduation_builds_entities_items_and_edges(tmp_path: Path) -> None:
 def test_second_session_reinforces_reuses_entities_and_invalidates(tmp_path: Path) -> None:
     k = store(tmp_path)
     graduate(k, seg(("add a lock", "done"), ("add retries", "done")), Script([LOCK]), topic_embed)
-    old_lock = next(i for i in k.items.values() if "SETNX" in i.statement)
-    retries = next(i for i in k.items.values() if "retries" in i.statement)
+    old_lock = next(i for i in k.scan() if "SETNX" in i.statement)
+    retries = next(i for i in k.scan() if "retries" in i.statement)
 
     later = T0 + timedelta(days=1)
     ask = Script(
@@ -159,20 +159,20 @@ def test_second_session_reinforces_reuses_entities_and_invalidates(tmp_path: Pat
     graduate(k, seg(("lock deadlocks, fix it", "replaced with lua"), start=later), ask, topic_embed)
 
     # exact and case-insensitive entity names are reused, not duplicated
-    assert len(k.entities) == 2
-    redis = next(e for e in k.entities.values() if e.name == "Redis")
+    assert len(k.names) == 2
+    redis = next(e for e in k.scan_entities() if e.name == "Redis")
     assert redis.mentions == 2
     # the identical statement was reinforced without asking the model about it
     assert retries.strength == 2.0 and len(retries.segments) == 2
     merge_prompt = ask.prompts[1]
     assert "\nN2 " not in merge_prompt and "SETNX" in merge_prompt
     # the contradicted item keeps its history
-    new_lock = next(i for i in k.items.values() if "Lua" in i.statement)
+    new_lock = next(i for i in k.scan() if "Lua" in i.statement)
     assert not old_lock.valid and old_lock.invalid_at == later
     assert old_lock.invalidated_by == new_lock.item_id
-    sup = k.edges[(new_lock.item_id, old_lock.item_id, "supersedes")]
+    sup = k.edge((new_lock.item_id, old_lock.item_id, "supersedes"))
     assert sup.reason == "the lock was replaced"
-    rel = [e for e in k.edges.values() if e.relation is Relation.DEPENDS_ON]
+    rel = [e for e in k.scan_edges() if e.relation is Relation.DEPENDS_ON]
     assert len(rel) == 1 and rel[0].weight == 0.3
     assert k.stats()["items"] == 2 and k.stats()["invalidated"] == 1
 
@@ -210,16 +210,16 @@ def test_model_answers_about_entities_merge_them(tmp_path: Path) -> None:
     ask = Script([extract], [{"items": [], "entities": [{"q": "Q1", "same_as": "C1"}]}])
     graduate(k, seg(("x", "y")), ask, topic_embed)
     assert "Q1: throttle" in ask.prompts[1]
-    (ent,) = k.entities.values()
+    (ent,) = k.scan_entities()
     assert ent.aliases == ["throttle"] and ent.mentions == 2
-    (item,) = k.items.values()
+    (item,) = k.scan()
     assert item.entities == [ent.entity_id]
 
 
-def test_fuzzy_names() -> None:
+def test_fuzzy_names(tmp_path: Path) -> None:
     assert not fuzzy_safe("ui") and not fuzzy_safe("aaaaaaaa")
     assert fuzzy_safe("graph memory daemon")
-    k = KnowledgeStore(Path("/nonexistent-gm-test"), None)
+    k = KnowledgeStore(tmp_path, None)
     e = k.add_entity(Entity(name="graph-memory daemon", kind=EntityKind.COMPONENT))
     assert k.fuzzy_entity("graph memory daemon") is e
     assert k.fuzzy_entity("graph memory server") is None
@@ -291,7 +291,7 @@ def test_daemon_graduates_quiet_sessions(short_dir: Path) -> None:
     try:
         call(cfg, "remember", {"session": "s", "turn": turn("add a lock", "done")}, autostart=False)
         _wait(lambda: daemon.knowledge.stats()["segments"] == 1, timeout=8)
-        (segment,) = daemon.knowledge.segments.values()
+        (segment,) = daemon.knowledge.segments()
         assert segment.trigger == "idle"
         # the session may go on: its exchange became a summary of what was learned
         _wait(lambda: not daemon.buffer.exchanges("s"))
@@ -326,10 +326,10 @@ def test_same_names_and_hubs(tmp_path: Path) -> None:
         ],
     }
     graduate(k, seg(("a", "b")), Script([extract]), topic_embed)
-    assert sorted(e.name for e in k.entities.values()) == ["graph_memory daemon", "the user"]
+    assert sorted(e.name for e in k.scan_entities()) == ["graph_memory daemon", "the user"]
     assert k.entity_by_name("graph memory daemon") is not None
     # sharing only a person entity is no reason to link two items
-    assert not k.edges
+    assert not k.links
 
 
 def test_short_file_names_join_their_paths(tmp_path: Path) -> None:
@@ -348,9 +348,9 @@ def test_short_file_names_join_their_paths(tmp_path: Path) -> None:
         ],
     }
     graduate(k, seg(("a", "b")), Script([extract]), topic_embed)
-    (e,) = k.entities.values()
+    (e,) = k.scan_entities()
     assert e.name == "src/pkg/engine.py"
-    assert next(iter(k.items.values())).entities == [e.entity_id]
+    assert next(iter(k.scan())).entities == [e.entity_id]
     assert k.entity_by_name("engine.py") is e
 
 
@@ -390,13 +390,13 @@ def test_learned_items_keep_where_they_came_from(tmp_path: Path) -> None:
     k = KnowledgeStore(tmp_path, topic_embed)
     s = seg(("how do I model many-to-many in sqlite?", "Use a join table ..."))
     graduate(k, s, Script([SQLITE]), topic_embed)
-    learned = next(i for i in k.items.values() if i.type is ItemType.LEARNED)
+    learned = next(i for i in k.scan() if i.type is ItemType.LEARNED)
     assert (learned.origin, learned.applies_to, learned.volatility) == (
         Origin.ASSISTANT,
         "SQLite 3",
         Volatility.VERSIONED,
     )
-    weighing = next(i for i in k.items.values() if i.type is ItemType.OPEN)
+    weighing = next(i for i in k.scan() if i.type is ItemType.OPEN)
     assert (weighing.origin, weighing.volatility) == (Origin.ASSISTANT, Volatility.STABLE)
 
     # the same knowledge read in the docs later: reinforced, and now from docs

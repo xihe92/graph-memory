@@ -160,7 +160,7 @@ def test_nothing_the_daemon_keeps_or_sends_carries_a_secret(cfg: Config) -> None
         assert kept.commands == ["export GITHUB_TOKEN=[redacted: github-token]"]
         _graduate(cfg, "s", "compact", f"SUMMARY: deploy uses {AWS}")
         _wait(lambda: d.knowledge.stats()["segments"] == 1)
-        notes = [i.statement for i in d.knowledge.valid_items()]
+        notes = [i.statement for i in d.knowledge.scan(valid=True)]
         assert any("[redacted: github-token]" in n for n in notes)
         _graduate(cfg, "s", "session_end")
         _wait(lambda: d.buffer.sessions() == [])

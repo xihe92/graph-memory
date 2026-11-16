@@ -20,6 +20,7 @@ from ..embedding import MODELS, LocalEmbedder
 from ..graduation import Ask
 from ..knowledge import KnowledgeStore
 from ..models import CommandModel, claude_code_model
+from ..storage import StorageError
 from ..vectors import Embedder
 from .core import Daemon
 from .state import log
@@ -102,9 +103,14 @@ def run_daemon(cfg: Config) -> int:
     embedder = build_embedder(cfg)
     if embedder is not None:
         embedder("warm up")  # load the model before accepting requests
+    try:
+        knowledge = KnowledgeStore(cfg.home, embedder)
+    except StorageError as exc:  # memory still in JSON files, or no SQLite extensions
+        log.error("cannot open memory: %s", exc)
+        return 1
     daemon = Daemon(
         cfg,
-        knowledge=KnowledgeStore(cfg.home, embedder),
+        knowledge=knowledge,
         embedder=embedder,
         graduation_model=build_model(cfg),
     )

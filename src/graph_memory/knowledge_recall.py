@@ -20,8 +20,8 @@ from __future__ import annotations
 import math
 import re
 import time
-from collections import Counter, defaultdict
-from collections.abc import Iterable, Sequence
+from collections import defaultdict
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -29,6 +29,7 @@ from . import clock
 from .knowledge import (
     ORIGIN_LABEL,
     TOPIC_PREFIX,
+    Head,
     Item,
     ItemType,
     KnowledgeStore,
@@ -38,58 +39,16 @@ from .knowledge import (
     topic_of,
 )
 from .projects import project_title
+from .words import stem as stem
+from .words import tokens as tokens
 
 RRF_K = 60
 ALPHA = 0.2  # restart probability
 EPSILON = 1e-4
 MAX_DEGREE = 20  # strongest edges kept per node
+_LINKING = tuple(r.value for r in Relation if r is not Relation.SUPERSEDES)  # supersedes is history
 _WORD = re.compile(r"\w+")
 _AFTER_NAME = re.compile(r"[\w-]|\.\w")
-_TOKEN = re.compile(r"[a-z0-9][a-z0-9_.\-/]*[a-z0-9]|[a-z0-9]")
-_STOP = frozenset(
-    "a an and are as at be but by can do does for from has have how i if in is it its "
-    "me my no not of on or our so that the their them then there these this to was we "
-    "what when where which who why will with you your should would could let lets just "
-    "now also any all some more most other into than too very use used using get make "
-    "want need like see show tell give go ok yes please after before between instead "
-    "up down out over under again still only same such each both one two per re".split()
-)
-
-
-_KEEP_DOUBLE = ("ll", "ss", "zz")
-
-
-def stem(word: str) -> str:
-    """Light suffix stripping for plain words, so "tests" meets "test", "running" meets
-    "run" and "raced" meets "race" (both "rac": a final e is dropped from every stem).
-    Only consistency matters: the same function reads prompts, items and replies. Names
-    with digits or punctuation (files, symbols) are left alone."""
-    if len(word) < 4 or not word.isalpha():
-        return word
-    w = word
-    if w.endswith("ies") and len(w) > 4:
-        w = w[:-3] + "y"
-    elif w.endswith(("ing", "ed")) and len(w) - (3 if w.endswith("ing") else 2) >= 3:
-        w = w[:-3] if w.endswith("ing") else w[:-2]
-        if len(w) > 3 and w[-1] == w[-2] and w[-2:] not in _KEEP_DOUBLE:
-            w = w[:-1]
-    elif w.endswith("s") and len(w) > 4 and not w.endswith(("ss", "us", "is")):
-        w = w[:-1]
-    if len(w) >= 4 and w.endswith("e") and not w.endswith("ee"):
-        w = w[:-1]
-    return w
-
-
-def tokens(text: str) -> list[str]:
-    """Stemmed words without stop words. A hyphenated word also yields its parts, so
-    "per-tenant" matches "tenant"; paths and dotted names stay whole."""
-    out = []
-    for t in _TOKEN.findall(text.lower()):
-        if t not in _STOP and len(t) > 1:
-            out.append(stem(t))
-        if "-" in t and "/" not in t and "." not in t:
-            out.extend(stem(p) for p in t.split("-") if p not in _STOP and len(p) > 1)
-    return out
 
 
 @dataclass(frozen=True)
@@ -149,24 +108,16 @@ class KnowledgeIndex:
         self._links: dict[str, dict[str, float]] = defaultdict(dict)
         self._adj: dict[str, list[tuple[str, float]]] = {}  # built on demand
         self._wdeg: dict[str, float] = {}
-        self.docs: dict[str, Counter[str]] = {}
-        self._len: dict[str, int] = {}
-        self._total_len = 0
-        self.df: Counter[str] = Counter()
-        self._postings: dict[str, set[str]] = defaultdict(set)
         # entity names: first word (or first character, for a name that starts with
         # one that is not a word character) -> {(name as written, entity)}
         self._names: dict[str, set[tuple[str, str]]] = defaultdict(set)
         self._name_keys: dict[str, list[tuple[str, tuple[str, str]]]] = {}  # entity -> entries
 
-    @property
-    def avg_len(self) -> float:
-        return self._total_len / len(self.docs) if self.docs else 1.0
-
     # ------------------------------------------------------------------ upkeep
 
     def fresh(self) -> None:
         s = self.store
+        s.sync_words()  # the word index lives in memory.db, kept by the store
         if self.version == s.version:
             return
         if self._epoch != s.epoch or self.version < 0:
@@ -193,24 +144,23 @@ class KnowledgeIndex:
     def _rebuild(self) -> None:
         s = self.store
         self.__init__(s)  # type: ignore[misc]
-        for edge in s.edges.values():
-            self._link(edge.source, edge.target)
-        for it in s.items.values():
-            if it.recallable:
-                self._add_item(it)
+        for src, tgt, _ in s.links:
+            self._link(src, tgt)
+        for i, h in s.heads.items():
+            if h.recallable:
+                self._add_item(i, h)
         for e in self.by_entity:
             self._update_names(e)
 
     def _link(self, a: str, b: str) -> None:
         """The strongest edge between two items, supersedes left out (it is history)."""
-        edges = self.store.edges
+        links = self.store.links
         w = max(
             (
-                e.weight
-                for rel in Relation
-                if rel is not Relation.SUPERSEDES
-                for e in (edges.get((a, b, rel.value)), edges.get((b, a, rel.value)))
-                if e is not None
+                w
+                for rel in _LINKING
+                for w in (links.get((a, b, rel)), links.get((b, a, rel)))
+                if w is not None
             ),
             default=0.0,
         )
@@ -225,12 +175,12 @@ class KnowledgeIndex:
         self._stale(a, b)
 
     def _update_item(self, item_id: str) -> None:
-        it = self.store.items.get(item_id)
+        h = self.store.heads.get(item_id)
         before = set(self._entities_of.get(item_id, ()))
         if item_id in self.live:
             self._remove_item(item_id)
-        if it is not None and it.recallable:
-            self._add_item(it)
+        if h is not None and h.recallable:
+            self._add_item(item_id, h)
         after = set(self._entities_of.get(item_id, ()))
         # an entity's link weight depends on how many items it has, so its items move too
         for e in before | after:
@@ -238,25 +188,15 @@ class KnowledgeIndex:
             self._update_names(e)
         self._stale(item_id, *self._links.get(item_id, ()))
 
-    def _add_item(self, it: Item) -> None:
-        i = it.item_id
+    def _add_item(self, i: str, h: Head) -> None:
         self.live.add(i)
-        if it.volatility is Volatility.VOLATILE:
+        if h.volatility is Volatility.VOLATILE:
             self._volatile.add(i)
-        self.by_scope[it.scope].add(i)
-        self._scope_of[i] = it.scope
-        self._entities_of[i] = tuple(it.entities)
-        for e in it.entities:
+        self.by_scope[h.scope].add(i)
+        self._scope_of[i] = h.scope
+        self._entities_of[i] = h.entities
+        for e in h.entities:
             self.by_entity[e].add(i)
-        ents = self.store.entities
-        names = " ".join(ents[e].name for e in it.entities if e in ents)
-        tf = Counter(tokens(f"{it.statement} {it.why} {names}"))
-        self.docs[i] = tf
-        self._len[i] = sum(tf.values())
-        self._total_len += self._len[i]
-        self.df.update(tf.keys())
-        for t in tf:
-            self._postings[t].add(i)
 
     def _remove_item(self, i: str) -> None:
         self.live.discard(i)
@@ -269,15 +209,6 @@ class KnowledgeIndex:
             self.by_entity[e].discard(i)
             if not self.by_entity[e]:
                 del self.by_entity[e]
-        tf = self.docs.pop(i)
-        self._total_len -= self._len.pop(i)
-        for t in tf:
-            self.df[t] -= 1
-            if not self.df[t]:
-                del self.df[t]
-            self._postings[t].discard(i)
-            if not self._postings[t]:
-                del self._postings[t]
 
     def _stale(self, *nodes: str) -> None:
         for n in nodes:
@@ -289,7 +220,7 @@ class KnowledgeIndex:
             self._names[key].discard(entry)
             if not self._names[key]:
                 del self._names[key]
-        ent = self.store.entities.get(entity_id)
+        ent = self.store.names.get(entity_id)
         if ent is None or not self.by_entity.get(entity_id):
             return
         entries = []
@@ -316,7 +247,8 @@ class KnowledgeIndex:
         for s in scopes:
             out |= self.by_scope.get(s, set())
         if out & self._volatile:
-            out -= {i for i in out & self._volatile if not self.store.items[i].recallable}
+            heads = self.store.heads
+            out -= {i for i in out & self._volatile if not heads[i].recallable}
         return out
 
     def topics(self) -> set[str]:
@@ -328,35 +260,21 @@ class KnowledgeIndex:
         return self.by_entity.get(entity_id, set())
 
     def bm25(
-        self, query: Sequence[str], k: int = 10, among: set[str] | None = None
-    ) -> list[tuple[str, float]]:
-        """The best word matches, among the given items when a set is given. Only items
-        that share a word with the query are scored. Word statistics stay those of the
-        whole store, so a score means the same in every scope."""
-        n = len(self.docs)
-        if not n:
-            return []
-        q = Counter(query)
-        cands: set[str] = set()
-        for t in q:
-            cands |= self._postings.get(t, set())
-        if among is not None:
-            cands &= among
-        avg = self.avg_len
-        out = []
-        for doc_id in cands:
-            tf, dl = self.docs[doc_id], self._len[doc_id]
-            score = 0.0
-            for t in q:
-                f = tf.get(t)
-                if not f:
-                    continue
-                idf = math.log(1 + (n - self.df[t] + 0.5) / (self.df[t] + 0.5))
-                score += idf * f * 2.2 / (f + 1.2 * (0.25 + 0.75 * dl / avg))
-            if score > 0:
-                out.append((doc_id, score))
-        out.sort(key=lambda t: (-t[1], t[0]))
-        return out[:k]
+        self, query: Sequence[str], scopes: Sequence[str] | None = None, k: int = 10
+    ) -> list[tuple[str, float, int]]:
+        """The best word matches among the recallable items of these scopes (all when
+        None), as (id, score, how many of the query's words it holds). Scored in SQL over
+        the store's word index; word statistics are those of the whole index, so a score
+        means the same in every scope."""
+        self.fresh()
+        heads = self.store.heads
+        # in the index but no longer recallable: volatile items that fell due since
+        skip = [
+            i
+            for i in self._volatile
+            if (scopes is None or self._scope_of[i] in scopes) and not heads[i].recallable
+        ]
+        return self.store.word_scores(query, k, scopes, skip)
 
     def mentioned(self, text: str) -> list[str]:
         """The entities the text names, as whole words: a name counts where it is not
@@ -392,10 +310,6 @@ class KnowledgeIndex:
                 "volatile": ix._volatile,
                 "by_scope": {k: v for k, v in ix.by_scope.items() if v},
                 "by_entity": {k: v for k, v in ix.by_entity.items() if v},
-                "docs": ix.docs,
-                "df": +ix.df,
-                "length": ix._total_len,
-                "postings": {k: v for k, v in ix._postings.items() if v},
                 "names": {k: v for k, v in ix._names.items() if v},
                 "links": {k: v for k, v in ix._links.items() if v},
             }
@@ -404,7 +318,7 @@ class KnowledgeIndex:
         out = [k for k in mine if mine[k] != theirs[k]]
         nodes = ref.live | {"e:" + e for e in ref.by_entity}
         out += [f"links of {n}" for n in sorted(nodes) if self.neighbours(n) != ref.neighbours(n)]
-        return out
+        return out + self.store.word_differences()
 
     # ------------------------------------------------------------------ graph
 
@@ -492,8 +406,8 @@ class Here:
     project: str | None = None
     topics: frozenset[str] = frozenset()
 
-    def sees(self, item: Item) -> bool:
-        return item.scope == "global" or item.scope == self.project or item.scope in self.topics
+    def sees(self, scope: str) -> bool:
+        return scope == "global" or scope == self.project or scope in self.topics
 
     def scopes(self) -> list[str]:
         return ["global", *([self.project] if self.project else []), *self.topics]
@@ -524,14 +438,17 @@ def recall(
         return got
     have = {i.item_id for i in got.items}
     now = clock.now()
-    prefs = sorted(
-        (
-            i
-            for i in map(store.items.__getitem__, index.visible(here.scopes()))
-            if i.type is ItemType.PREFERENCE and i.item_id not in skip and i.item_id not in have
-        ),
-        key=lambda i: -i.vitality(now),
-    )[: pol.standing]
+    heads = store.heads
+    prefs = store.get_items(
+        sorted(
+            (
+                i
+                for i in index.visible(here.scopes())
+                if heads[i].type is ItemType.PREFERENCE and i not in skip and i not in have
+            ),
+            key=lambda i: -heads[i].vitality(now),
+        )[: pol.standing]
+    )
     if prefs:
         got.items = prefs + got.items
         for p in prefs:
@@ -567,7 +484,7 @@ def project_named(store: KnowledgeStore, prompt: str) -> str | None:
     """The project a prompt names, by its directory name ("graph_memory", "graph memory",
     "trip-planner"), among the projects memory has items for."""
     text = prompt.lower()
-    keys = {i.scope for i in store.valid_items() if i.scope.startswith("repo:")}
+    keys = {h.scope for h in store.heads.values() if h.valid and h.scope.startswith("repo:")}
     for key in sorted(keys, key=len, reverse=True):
         name = key.removeprefix("repo:").rstrip("/").rsplit("/", 1)[-1]
         if len(name) >= 3 and any(
@@ -591,17 +508,21 @@ def _add_open_items(
     if not asks_about_remaining_work(prompt):
         return
     target = project_named(store, prompt) or here.project
-    opens = sorted(
-        (
-            i
-            for i in store.valid_items()
-            if i.type is ItemType.OPEN
-            and i.item_id not in skip
-            and (target is None or i.scope in (target, "global") or i.scope in here.topics)
-        ),
-        key=lambda i: i.created_at,
-        reverse=True,
-    )[:OPEN_ITEMS]
+    heads = store.heads
+    opens = store.get_items(
+        sorted(
+            (
+                i
+                for i, h in heads.items()
+                if h.valid
+                and h.type is ItemType.OPEN
+                and i not in skip
+                and (target is None or h.scope in (target, "global") or h.scope in here.topics)
+            ),
+            key=lambda i: heads[i].created_at,
+            reverse=True,
+        )[:OPEN_ITEMS]
+    )
     if not opens:
         return
     first = {i.item_id for i in opens}  # they lead, even when ranking found them too
@@ -626,8 +547,7 @@ def _ranked(
     started = time.perf_counter()
     index.fresh()
 
-    def in_scope(i: Item, skipped: bool = False) -> bool:
-        return i.recallable and (skipped or i.item_id not in skip) and here.sees(i)
+    heads = store.heads
 
     # only what this session may see can seed: a strong match out of scope (a SQLite
     # item, in a session that is not about SQLite) must neither open the gate below nor
@@ -637,11 +557,13 @@ def _ranked(
     by_vector = store.similar(
         vec, "item", pol.vector_k, pol.vector_floor, among=visible, scopes=here.scopes()
     )
-    raw_words = index.bm25(tokens(prompt), among=visible)
+    raw = index.bm25(tokens(prompt), here.scopes())
+    raw_words = [(i, s) for i, s, _ in raw]
+    held = {i: n for i, _, n in raw}  # how many of the prompt's words each holds
     q = set(tokens(prompt))
 
     def covers(i: str) -> bool:
-        n = len(q & index.docs[i].keys())
+        n = held[i]
         return n >= 2 and n >= pol.min_coverage * len(q)
 
     # a hit on one common word is not a seed; ranking (RRF) and the mass floor below
@@ -679,20 +601,20 @@ def _ranked(
     # used or seen again often counts up to 1.0
     now = clock.now()
     scored = [
-        (store.items[u], m * (0.6 + 0.4 * min(1.0, store.items[u].vitality(now) / 3)))
+        (u, m * (0.6 + 0.4 * min(1.0, heads[u].vitality(now) / 3)))
         for u, m in mass.items()
-        if u in store.items and in_scope(store.items[u], skipped=True)
+        if u in heads and heads[u].recallable and here.sees(heads[u].scope)
     ]
     # the floor is relative to the best item in scope, shown before or not: excluding
     # the best one must not promote its weak neighbours
     top = max((m for _, m in scored), default=0.0)
-    cands = [(i, m) for i, m in scored if i.item_id not in skip]
+    cands = [(i, m) for i, m in scored if i not in skip]
     if not cands:
         return Recalled(
             [],
             {},
             dict(seeds),
-            [store.entities[e].name for e in entities],
+            [store.names[e].name for e in entities],
             "seeds lead to nothing in scope",
             round((time.perf_counter() - started) * 1000, 2),
         )
@@ -700,34 +622,34 @@ def _ranked(
     cands = [(i, m / top) for i, m in cands if m >= pol.min_mass * top][: pol.max_items * 4]
 
     # MMR: relevance from PageRank, redundancy from the item vectors
-    vecs = {i.item_id: store.vectors.get(i.item_id) for i, _ in cands}
-    chosen: list[tuple[Item, float]] = []
+    vecs = {i: store.vectors.get(i) for i, _ in cands}
+    chosen: list[tuple[str, float]] = []
     pool = list(cands)
     used = 0
     while pool and len(chosen) < pol.max_items:
 
-        def mmr(t: tuple[Item, float]) -> float:
-            sim = max((_cos(vecs[t[0].item_id], vecs[c.item_id]) for c, _ in chosen), default=0.0)
+        def mmr(t: tuple[str, float]) -> float:
+            sim = max((_cos(vecs[t[0]], vecs[c]) for c, _ in chosen), default=0.0)
             return pol.mmr_lambda * t[1] - (1 - pol.mmr_lambda) * sim
 
         best = max(pool, key=mmr)
         pool.remove(best)
-        size = len(best[0].statement) + len(best[0].why) + 20
+        size = heads[best[0]].chars + 20
         if chosen and used + size > pol.max_chars:
             continue
         chosen.append(best)
         used += size
-    for it, _ in chosen:
-        if not why.get(it.item_id):
-            why[it.item_id].append("linked")
+    for i, _ in chosen:
+        if not why.get(i):
+            why[i].append("linked")
     return Recalled(
-        [i for i, _ in chosen],
-        {i.item_id: round(s, 3) for i, s in chosen},
+        store.get_items(i for i, _ in chosen),
+        {i: round(s, 3) for i, s in chosen},
         dict(seeds),
-        [store.entities[e].name for e in entities],
+        [store.names[e].name for e in entities],
         "ok",
         round((time.perf_counter() - started) * 1000, 2),
-        {i.item_id: why[i.item_id] for i, _ in chosen},
+        {i: why[i] for i, _ in chosen},
     )
 
 
@@ -785,12 +707,18 @@ def used_by(
     reply_tokens: set[str],
     reply_vector: Sequence[float] | None,
     item_vector: Sequence[float] | None,
+    df: Mapping[str, int] | None = None,
 ) -> bool:
     """Did the reply use this recalled item? Cheap evidence, no model: most of the item's
-    distinctive words appear in the reply, or the reply is close to it in meaning."""
+    distinctive words appear in the reply, or the reply is close to it in meaning. `df`:
+    how many notes hold each word, when the caller read it for several items at once."""
     index.fresh()
-    n = max(1, len(index.docs))
-    words = {t for t in tokens(item.statement) if index.df.get(t, 0) <= max(2, n // 4)}
+    store = index.store
+    n = max(1, store.doc_count)
+    stmt = tokens(item.statement)
+    if df is None:
+        df = store.word_df(stmt)
+    words = {t for t in stmt if df.get(t, 0) <= max(2, n // 4)}
     hits = len(words & reply_tokens)
     share = hits / len(words) if words else 0.0
     if (

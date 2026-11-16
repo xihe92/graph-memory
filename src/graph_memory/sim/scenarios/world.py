@@ -100,7 +100,7 @@ def project_isolation() -> Scenario:
 
 
 def _no_scratch_scope(sim: Simulator) -> str | None:
-    bad = [i.statement for i in sim.store.items.values() if "scratch" in i.scope]
+    bad = [i.statement for i in sim.store.scan() if "scratch" in i.scope]
     return f"scoped to scratch: {bad}" if bad else None
 
 
@@ -186,7 +186,7 @@ def _one_entity(*names: str) -> Callable[[Simulator], str | None]:
     def check(sim: Simulator) -> str | None:
         hits = {
             e.entity_id
-            for e in sim.store.entities.values()
+            for e in sim.store.scan_entities()
             for n in names
             if e.name.lower() == n.lower() or n.lower() in (a.lower() for a in e.aliases)
         }

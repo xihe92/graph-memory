@@ -97,7 +97,7 @@ def test_extraction_scopes_items_to_a_topic(tmp_path: Path) -> None:
         ]
     )
     graduate(k, s, ask, topic_embed)
-    by = {i.statement: i.scope for i in k.items.values()}
+    by = {i.statement: i.scope for i in k.scan()}
     assert by[ONEWAY] == "topic:SQLite"
     assert by["SQLite keeps a whole database in one file"] == "topic:SQLite"  # one spelling
     assert by["The user reads docs before trusting answers"] == "global"
@@ -117,7 +117,7 @@ def test_a_project_item_stays_in_its_project_and_a_global_one_narrows(tmp_path: 
     )
     graduate(k, seg(("sqlite foreign keys?", "off by default")), ask, topic_embed)
     assert old.scope == "topic:SQLite"  # restated as about SQLite: recalled only there now
-    new = next(i for i in k.items.values() if i.statement.startswith("limiter"))
+    new = next(i for i in k.scan() if i.statement.startswith("limiter"))
     assert new.scope == REPO
 
 
@@ -211,17 +211,20 @@ def test_rescope_proposes_then_applies(
         b = k.add_item(Item(type=ItemType.FACT, statement="limiter keeps counters in Redis"))
         c = k.add_item(Item(type=ItemType.PREFERENCE, statement="answer briefly", scope=REPO))
         for n, i in enumerate((a, b, c)):
-            i.created_at = T0.replace(minute=n)
+            k.edit(i.item_id).created_at = T0.replace(minute=n)
+            k.touch(i.item_id)
         assert cli.main(["knowledge", "rescope", "--wait"]) == 0
         out = capsys.readouterr().out
         assert "-> topic SQLite (1)" in out and "-> project limiter (1)" in out
         assert "-> global (1)" in out and "3 items would move" in out
-        assert a.scope == "global"  # nothing changed yet
-        b.scope = "topic:Redis"  # changed since the preview: kept
+        assert k.heads[a.item_id].scope == "global"  # nothing changed yet
+        k.edit(b.item_id).scope = "topic:Redis"  # changed since the preview: kept
+        k.touch(b.item_id)
         assert cli.main(["knowledge", "rescope", "--apply"]) == 0
         out = capsys.readouterr().out
         assert "rescoped 2 items; 1 changed since the preview kept theirs" in out
-        assert (a.scope, b.scope, c.scope) == ("topic:SQLite", "topic:Redis", "global")
+        scopes = tuple(k.heads[i.item_id].scope for i in (a, b, c))
+        assert scopes == ("topic:SQLite", "topic:Redis", "global")
         assert not (cfg.home / "rescope.json").exists()
         assert cli.main(["knowledge", "rescope", "--apply"]) == 1
 
@@ -234,11 +237,11 @@ def test_scope_by_hand(cfg: Config, monkeypatch: pytest.MonkeyPatch) -> None:  #
         k.add_item(Item(type=ItemType.FACT, statement="limiter uses redis", scope=REPO))
         k.add_item(Item(type=ItemType.FACT, statement="sqlite is small", scope="topic:SQLite"))
         assert cli.main(["knowledge", "scope", a.item_id[:8], "--to", "topic:sqlite"]) == 0
-        assert a.scope == "topic:SQLite"
+        assert k.heads[a.item_id].scope == "topic:SQLite"
         assert cli.main(["knowledge", "scope", a.item_id[:8], "--to", "limiter"]) == 0
-        assert a.scope == REPO
+        assert k.heads[a.item_id].scope == REPO
         assert cli.main(["knowledge", "scope", a.item_id[:8], "--to", "global"]) == 0
-        assert a.scope == "global"
+        assert k.heads[a.item_id].scope == "global"
         assert cli.main(["knowledge", "scope", a.item_id[:8], "--to", "nowhere"]) == 1
         assert cli.main(["knowledge", "scope", a.item_id[:8]]) == 2
         with pytest.raises(RemoteError):

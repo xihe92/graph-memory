@@ -51,7 +51,7 @@ def test_use_strengthens_and_links_items_used_together(tmp_path: Path) -> None:
     assert a.uses == 1 and a.strength == 1.5 and a.area is Area.SURVIVOR
     k.mark_used([a.item_id, b.item_id])
     assert a.area is Area.OLD
-    (edge,) = k.edges.values()
+    (edge,) = k.scan_edges()
     assert edge.relation is Relation.CO_USED and edge.weight == 0.3 and edge.origin == "co_use"
 
 
@@ -92,7 +92,7 @@ def test_daemon_counts_use_after_the_reply(short_dir: Path) -> None:
         _wait(lambda: '"knowledge_use"' in events.read_text())
         use = next(json.loads(x) for x in events.read_text().splitlines() if '"knowledge_use"' in x)
         assert use["used"] and use["mode"] == "shadow"
-        lock = daemon.knowledge.items[use["used"][0]]
+        lock = daemon.knowledge.item(use["used"][0])
         assert lock.uses == 1 and "SETNX" in lock.statement
     finally:
         call(cfg, "shutdown", autostart=False)

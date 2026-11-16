@@ -36,15 +36,20 @@ from typing import Any
 from . import clock
 from .anchors import CodeAnchor, SourceRef
 from .buffer import Exchange, SessionBuffer
-from .knowledge import KNOWLEDGE_FILE, KnowledgeStore
+from .knowledge import KNOWLEDGE_FILE, Item, KnowledgeStore, Segment, add_source
 from .storage import (
     DB_FILE,
     JSON_FILES,
-    JsonBackend,
+    Image,
     SqliteBackend,
     differences,
+    read_db,
+    read_json,
     sqlite_problem,
+    write_db,
+    write_json,
 )
+from .vectors import JsonVectorIndex
 
 OLD_FILES = ("nodes", "graph.json", "chroma")
 CONTENT_MARKER = "<!-- gme:content -->"
@@ -205,9 +210,9 @@ def apply(p: Plan) -> dict[str, Any]:
         tmp.unlink()
         raise RuntimeError(f"archive check failed: missing {sorted(expected - names)}")
     os.replace(tmp, p.archive)
-    # 3. knowledge in the new format (loading fills the sources from the segments)
+    # 3. knowledge in the new format, each item with its sources
     if (home / KNOWLEDGE_FILE).exists():
-        KnowledgeStore(home, backend=JsonBackend(home)).save()
+        write_json(with_sources(read_json(home)), home)
     # 4. the old files go
     for f in members:
         target = home / f
@@ -266,16 +271,7 @@ def sqlite_plan(home: Path) -> SqlitePlan:
         return p
     p.problem = sqlite_problem()
     p.json_bytes = sum((home / f).stat().st_size for f in JSON_FILES if (home / f).exists())
-    store = KnowledgeStore(home, backend=JsonBackend(home))
-    p.counts = {
-        "items": len(store.items),
-        "entities": len(store.entities),
-        "edges": len(store.edges),
-        "segments": len(store.segments),
-        "vectors": sum(store.vectors.get(i) is not None for i in [*store.items, *store.entities]),
-        "deletions": len(store.deleted()),
-        "summaries": len(store.summaries()),
-    }
+    p.counts = read_json(home).counts()
     return p
 
 
@@ -291,13 +287,20 @@ def sqlite_apply(p: SqlitePlan) -> dict[str, Any]:
     new = home / (DB_FILE + ".new")
     for leftover in (new, new.with_name(new.name + "-wal"), new.with_name(new.name + "-shm")):
         leftover.unlink(missing_ok=True)  # from a run that stopped part way
-    src = KnowledgeStore(home, backend=JsonBackend(home))
-    dst = KnowledgeStore(home, backend=SqliteBackend(new))
-    counts = copy_memory(src, dst)
-    dst.close()
-    check = KnowledgeStore(home, backend=SqliteBackend(new))
-    diff = differences(src, check)
-    check.close()
+    src = with_sources(read_json(home))
+    db = SqliteBackend(new)
+    try:
+        write_db(src, db)
+        diff = differences(src, read_db(db)) or _nearest_differ(src, db)
+    finally:
+        db.close()
+    counts = src.counts()
+    if not diff:
+        # the word index, built while the files are still the memory: a failure here
+        # leaves them as they were
+        built = KnowledgeStore(home, backend=SqliteBackend(new))
+        built.save()
+        built.close()
     if diff:
         new.unlink(missing_ok=True)
         raise RuntimeError("the new memory.db differs from the JSON files: " + "; ".join(diff))
@@ -325,42 +328,44 @@ def sqlite_apply(p: SqlitePlan) -> dict[str, Any]:
     }
 
 
-def copy_memory(src: KnowledgeStore, dst: KnowledgeStore) -> dict[str, int]:
-    """Copy all of `src` into the empty store `dst` and save it in full: items, entities,
-    edges, graduations, vectors exactly as stored, deletions and summaries. A vector
-    whose id is neither an item nor an entity (left by an old bug) is not carried over."""
-    for kind, live in src.collections().items():
-        dst.collections()[kind].update(live)
-    vectors = 0
-    for kind, ids in (("item", src.items), ("entity", src.entities)):
-        for i in ids:
-            v = src.vectors.get(i)
-            if v is not None:
-                dst.vectors.upsert(i, v, src.vector_meta(kind, i), unit=True)
-                vectors += 1
-    for batch in src.deleted():
-        dst.backend.log_deletion(batch)
-    summaries = src.summaries()
-    if summaries:
-        dst.backend.set_summaries(summaries)
-    dst.save(full=True)
-    return {
-        "items": len(src.items),
-        "entities": len(src.entities),
-        "edges": len(src.edges),
-        "segments": len(src.segments),
-        "vectors": vectors,
-        "deletions": len(src.deleted()),
-        "summaries": len(summaries),
-    }
+def with_sources(img: Image) -> Image:
+    """The image with every item in the current format, and each item learned before
+    items kept their sources given them from its graduation segments."""
+    segs = {g.segment_id: g for g in (Segment.model_validate(r) for r in img.segments)}
+    img.segments = [g.model_dump(mode="json") for g in segs.values()]
+    items = []
+    for raw in img.items:
+        it = Item.model_validate(raw)
+        if not it.sources:
+            for sid in it.segments:
+                if sid in segs:
+                    add_source(it, segs[sid].session, segs[sid].end)
+        items.append(it.model_dump(mode="json"))
+    img.items = items
+    return img
+
+
+def _nearest_differ(img: Image, db: SqliteBackend, queries: int = 50) -> list[str]:
+    """The nearest notes to 50 items' vectors, found by sqlite-vec in memory.db, against
+    an exact search over the files' vectors."""
+    exact = JsonVectorIndex(Path("/nonexistent/vectors.json"))  # in memory only
+    for i, v in img.vectors.items():
+        exact.upsert(i, v, {"kind": img.kinds.get(i, "item")}, unit=True)
+    for i in [r["item_id"] for r in img.items][:queries]:
+        if i not in img.vectors:
+            continue
+        v = img.vectors[i]
+        want = [n for n, _ in exact.query(v, 12, where={"kind": "item"})]
+        got = [n for n, _ in db.vectors.query(v, 12, where={"kind": "item"})]
+        if want != got:
+            return [f"the nearest notes to {i} differ"]
+    return []
 
 
 def export_json(store: KnowledgeStore, dest: Path) -> dict[str, int]:
     """Write a memory out in the JSON format (`gm export`): the files a version from
     before SQLite reads, and readable in any editor."""
-    dest.mkdir(parents=True, exist_ok=True)
-    for name in JSON_FILES:
-        (dest / name).unlink(missing_ok=True)
-    out = KnowledgeStore(dest, backend=JsonBackend(dest))
-    counts = copy_memory(store, out)
-    return counts
+    store.flush()
+    img = read_db(store.backend)
+    write_json(img, dest)
+    return img.counts()

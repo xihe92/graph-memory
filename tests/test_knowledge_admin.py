@@ -52,7 +52,7 @@ def test_retract_keeps_history_and_stops_recall(tmp_path: Path) -> None:
     assert a.invalid_at == first and a.invalid_reason == "replaced outside any session"
 
     k.save()
-    again = KnowledgeStore(tmp_path, topic_embed).items[a.item_id]
+    again = KnowledgeStore(tmp_path, topic_embed).item(a.item_id)
     assert not again.valid and again.invalid_reason == "replaced outside any session"
 
 
@@ -70,13 +70,13 @@ def test_restore_undoes_a_model_invalidation_and_its_edge(tmp_path: Path) -> Non
     k.add_edge(new.item_id, old.item_id, Relation.REFINES, 0.6)
     k.invalidate(old.item_id, new, "lock replaced the script")
     assert old.invalidated_by == new.item_id and old.invalid_reason == "lock replaced the script"
-    assert (new.item_id, old.item_id, "supersedes") in k.edges
+    assert (new.item_id, old.item_id, "supersedes") in k.links
 
     k.restore(old.item_id)
     assert old.valid and old.invalidated_by is None and old.expired_at is None
     assert old.invalid_reason == ""
-    assert (new.item_id, old.item_id, "supersedes") not in k.edges
-    assert (new.item_id, old.item_id, "refines") in k.edges  # other edges stay
+    assert (new.item_id, old.item_id, "supersedes") not in k.links
+    assert (new.item_id, old.item_id, "refines") in k.links  # other edges stay
     v = k.version
     k.restore(old.item_id)  # already true: nothing changes
     assert k.version == v
@@ -151,7 +151,7 @@ def test_daemon_retract_and_restore(admin: tuple[Config, Daemon]) -> None:
     assert call(cfg, "knowledge_restore", {"id": "bbbb3333"})["valid"] is True
     events = (cfg.home / "events.jsonl").read_text()
     assert '"knowledge_retract"' in events and '"knowledge_restore"' in events
-    assert daemon.knowledge_dirty or not daemon.knowledge.items["bbbb3333"].invalid_at
+    assert daemon.knowledge_dirty or not daemon.knowledge.item("bbbb3333").invalid_at
 
 
 @pytest.mark.parametrize("ref", ["aaaa", "", "zzzz"])
@@ -159,7 +159,7 @@ def test_retract_refuses_an_unclear_id(admin: tuple[Config, Daemon], ref: str) -
     cfg, daemon = admin
     with pytest.raises(RuntimeError, match="ambiguous|no knowledge item"):
         call(cfg, "knowledge_retract", {"id": ref})
-    assert all(i.valid for i in daemon.knowledge.items.values())
+    assert all(i.valid for i in daemon.knowledge.scan())
 
 
 def test_detail_with_an_empty_id_is_an_error(admin: tuple[Config, Daemon]) -> None:
@@ -174,7 +174,7 @@ def test_gm_knowledge_commands(
     cfg, daemon = admin
     code, out, _ = _gm(capsys, "knowledge", "retract", "aaaa1", "--reason", "switched to SETNX")
     assert code == 0 and "aaaa1111 is now no longer true" in out
-    it = daemon.knowledge.items["aaaa1111"]
+    it = daemon.knowledge.item("aaaa1111")
     assert not it.valid and it.invalid_reason == "switched to SETNX"
 
     code, out, _ = _gm(capsys, "knowledge")
@@ -190,6 +190,7 @@ def test_gm_knowledge_commands(
     assert code == 0 and json.loads(out)["item"]["invalid_reason"] == "switched to SETNX"
 
     code, out, _ = _gm(capsys, "knowledge", "restore", "aaaa1111")
+    it = daemon.knowledge.item("aaaa1111")
     assert code == 0 and "is now true again" in out and it.valid
 
     for action in ("show", "retract", "restore"):
@@ -271,7 +272,7 @@ def test_web_retract_and_restore(admin: tuple[Config, Daemon]) -> None:
             ui, "/api/kretract", {"id": "aaaa1111", "reason": "done"}, token=ui.token
         )
         assert status == 200 and res["valid"] is False
-        assert daemon.knowledge.items["aaaa1111"].invalid_reason == "done"
+        assert daemon.knowledge.item("aaaa1111").invalid_reason == "done"
         status, view = _req(ui, "/api/knowledge", token=ui.token)
         assert [s["name"] for s in view["scopes"]] == ["global", "limiter"]
         status, res = _req(ui, "/api/krestore", {"id": "aaaa1111"}, token=ui.token)
@@ -300,27 +301,29 @@ def test_gm_delete_review_confirm_and_undelete(
     monkeypatch.setattr(sys, "stdin", io.StringIO(""))  # not a terminal: never prompts
     code, out, err = _gm(capsys, "knowledge", "delete", "aaaa2")
     assert code == 1 and "short answers" in out and "--yes" in err
-    assert "aaaa2222" in k.items
+    assert k.has("aaaa2222")
     code, out, _ = _gm(capsys, "knowledge", "delete", "aaaa2", "--yes", "--reason", "noise")
     assert code == 0 and "deleted 1 items" in out and "1 bridge edges" in out
-    assert "aaaa2222" not in k.items
-    assert ("aaaa1111", "bbbb3333", "depends_on") in k.edges
+    assert not k.has("aaaa2222")
+    assert ("aaaa1111", "bbbb3333", "depends_on") in k.links
     batch = out.split("gm knowledge undelete ")[1].split()[0]
 
     # review: a disputed item, an overdue one, and the deletion to undo
     k.dispute("aaaa1111", "the reply showed SETNX")
-    k.items["bbbb3333"].volatility = Volatility.VOLATILE
-    k.items["bbbb3333"].checked_at = k.items["bbbb3333"].created_at.replace(year=2020)
+    stale = k.edit("bbbb3333")
+    stale.volatility = Volatility.VOLATILE
+    stale.checked_at = stale.created_at.replace(year=2020)
+    k.touch("bbbb3333")
     code, out, _ = _gm(capsys, "knowledge", "review")
     assert code == 0 and "disputed: the reply showed SETNX" in out
     assert "not re-checked since 2020-" in out and "[not recalled]" in out
     assert batch in out and "short answers" in out
     code, out, _ = _gm(capsys, "knowledge", "confirm", "bbbb")
-    assert code == 0 and "confirmed" in out and k.items["bbbb3333"].recallable
+    assert code == 0 and "confirmed" in out and k.item("bbbb3333").recallable
 
     code, out, _ = _gm(capsys, "knowledge", "undelete", batch)
-    assert code == 0 and "put back 1 items" in out and "aaaa2222" in k.items
-    assert ("aaaa1111", "bbbb3333", "depends_on") not in k.edges
+    assert code == 0 and "put back 1 items" in out and k.has("aaaa2222")
+    assert ("aaaa1111", "bbbb3333", "depends_on") not in k.links
     code, _, err = _gm(capsys, "knowledge", "undelete", batch)
     assert code == 1 and "no deletion" in err
     code, _, err = _gm(capsys, "knowledge", "undelete")
@@ -340,14 +343,14 @@ def test_web_delete_confirm_review_and_undelete(admin: tuple[Config, Daemon]) ->
             ui, "/api/kdelete", {"ids": ["aaaa1111", "bbbb3333"], "reason": "noise"}, token=ui.token
         )
         assert status == 200 and len(res["deleted"]) == 2
-        assert set(daemon.knowledge.items) == {"aaaa2222"}
+        assert set(daemon.knowledge.heads) == {"aaaa2222"}
         status, review = _req(ui, "/api/kreview", token=ui.token)
         assert status == 200 and review["deleted"][0]["batch"] == res["batch"]
         status, back = _req(ui, "/api/kundelete", {"batch": res["batch"]}, token=ui.token)
-        assert status == 200 and back["restored"] == 2 and len(daemon.knowledge.items) == 3
+        assert status == 200 and back["restored"] == 2 and len(daemon.knowledge.heads) == 3
         daemon.knowledge.dispute("aaaa2222", "maybe not")
         status, ok = _req(ui, "/api/kconfirm", {"id": "aaaa2222"}, token=ui.token)
-        assert status == 200 and daemon.knowledge.items["aaaa2222"].disputes == 0
+        assert status == 200 and daemon.knowledge.item("aaaa2222").disputes == 0
         status, view = _req(ui, "/api/knowledge", token=ui.token)
         mine = next(i for i in view["items"] if i["id"] == "aaaa2222")
         assert not mine["overdue"] and mine["disputes"] == 0

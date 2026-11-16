@@ -64,10 +64,10 @@ def test_real_graduation_learns_the_decision(tmp_path: Path, embedder) -> None: 
     )
     seg = SegmentInput("s1", xs, "session_end", "repo:/w/limiter", "limiter")
     graduate(k, seg, claude_code_model("haiku", timeout=300).complete, embedder)
-    statements = " ".join(i.statement.lower() for i in k.items.values())
+    statements = " ".join(i.statement.lower() for i in k.scan())
     assert "setnx" in statements
-    assert any(i.type is ItemType.PREFERENCE for i in k.items.values())
-    assert all(i.sources and i.sources[0].session == "s1" for i in k.items.values())
+    assert any(i.type is ItemType.PREFERENCE for i in k.scan())
+    assert all(i.sources and i.sources[0].session == "s1" for i in k.scan())
 
 
 @pytest.mark.skipif(shutil.which("claude") is None, reason="needs the claude CLI")
@@ -125,7 +125,7 @@ def test_real_graduation_keeps_what_the_user_learned_by_asking(tmp_path: Path, e
     ex = extract_step(seg, ask, embedder, [])
     plan = plan_merge(k, seg, ex)
     apply(k, plan, merge_step(plan, ask), 0.0)
-    items = list(k.items.values())
+    items = list(k.scan())
     text = " | ".join(f"{i.type.value}/{i.origin.value}: {i.statement}" for i in items)
     assert any("join" in i.statement.lower() or "array" in i.statement.lower() for i in items), text
     keys = [i for i in items if "foreign" in i.statement.lower()]
@@ -190,12 +190,12 @@ def test_real_merge_replaces_a_disputed_item(tmp_path: Path, embedder) -> None: 
     )
     seg = SegmentInput("s2", xs, "session_end", "repo:/w/recipes", "recipes")
     ask = claude_code_model("haiku", timeout=300).complete
-    ex = extract_step(seg, ask, embedder, [e.name for e in k.entities.values()])
+    ex = extract_step(seg, ask, embedder, [e.name for e in k.scan_entities()])
     plan = plan_merge(k, seg, ex)
     assert plan.prompt is not None and "DISPUTED" in plan.prompt
     apply(k, plan, merge_step(plan, ask), 0.0)
-    assert not old.valid, [i.statement for i in k.items.values()]
-    replacement = k.items[old.invalidated_by or ""]
+    assert not old.valid, [i.statement for i in k.scan()]
+    replacement = k.item(old.invalidated_by or "")
     said = replacement.statement.lower()
     assert (
         "place" in said or "add column" in said or "without" in said

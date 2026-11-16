@@ -105,13 +105,22 @@ def parse(raw: dict[str, Any], items: Sequence[Item], projects: Sequence[str]) -
     return out
 
 
-def propose(store: KnowledgeStore, ask: Ask, batch: int = BATCH) -> list[dict[str, Any]]:
-    """The changes the model proposes for the valid items, in batches; topics found in
-    one batch are offered to the next so the same subject keeps one name. Runs in a
-    worker thread; reads the store, changes nothing."""
-    items = sorted(store.valid_items(), key=lambda i: i.created_at)
-    projects = sorted({i.scope for i in store.items.values() if i.scope.startswith("repo:")})
-    topics = {k: v[len(TOPIC_PREFIX) :] for k, v in store.topics().items()}  # lower -> name
+def inputs(store: KnowledgeStore) -> tuple[list[Item], list[str], dict[str, str]]:
+    """What propose() reads, taken from the store on its own thread: the valid items,
+    oldest first; the projects memory has; its topics (lower-case name -> name)."""
+    items = sorted(store.scan(valid=True), key=lambda i: i.created_at)
+    projects = sorted({h.scope for h in store.heads.values() if h.scope.startswith("repo:")})
+    topics = {k: v[len(TOPIC_PREFIX) :] for k, v in store.topics().items()}
+    return items, projects, topics
+
+
+def propose(
+    items: list[Item], projects: list[str], topics: dict[str, str], ask: Ask, batch: int = BATCH
+) -> list[dict[str, Any]]:
+    """The changes the model proposes for the items, in batches; topics found in one
+    batch are offered to the next so the same subject keeps one name. Runs in a worker
+    thread on what inputs() took; changes nothing."""
+    topics = dict(topics)
     changes = []
     for start in range(0, len(items), batch):
         part = items[start : start + batch]

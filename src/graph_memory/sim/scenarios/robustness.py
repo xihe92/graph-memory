@@ -73,7 +73,7 @@ def crash_and_restart() -> Scenario:
 
 def _triggers(want: set[str]) -> Callable[[Simulator], str | None]:
     def check(sim: Simulator) -> str | None:
-        got = {sg.trigger for sg in sim.store.segments.values()}
+        got = {sg.trigger for sg in sim.store.segments()}
         return None if want <= got else f"triggers {sorted(got)}, want {sorted(want)}"
 
     return check
@@ -186,7 +186,7 @@ def noise() -> Scenario:
 
 def _items_at_most(n: int) -> Callable[[Simulator], str | None]:
     def check(sim: Simulator) -> str | None:
-        k = len(sim.store.items)
+        k = len(sim.store.heads)
         return None if k <= n else f"{k} items"
 
     return check
@@ -197,7 +197,7 @@ def _bounded_last_recall(sim: Simulator) -> str | None:
     if not recalls:
         return "nothing recalled for the log"
     items = recalls[-1]["items"]
-    chars = sum(len(sim.store.items[i].statement) + len(sim.store.items[i].why) for i in items)
+    chars = sum(len(i.statement) + len(i.why) for i in sim.store.get_items(items))
     if len(items) > 6 or chars > 2000:
         return f"{len(items)} items, {chars} chars"
     return None
@@ -255,7 +255,7 @@ def _no_key_on_disk(sim: Simulator) -> str | None:
 
 
 def _note_redacted(sim: Simulator) -> str | None:
-    notes = [i.statement for i in sim.store.valid_items() if "deploy settings" in i.statement]
+    notes = [i.statement for i in sim.store.scan(valid=True) if "deploy settings" in i.statement]
     if not notes:
         return "no note about the deploy settings"
     if not all("[redacted: github-token]" in n for n in notes):

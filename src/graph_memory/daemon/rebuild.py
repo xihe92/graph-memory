@@ -9,6 +9,7 @@ import asyncio
 import json
 import shutil
 import time
+from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -123,9 +124,9 @@ class Rebuilds(DaemonState):
         long = len(todo) > REBUILD_DIRECT_PARTS and not job.preview and not job.force
         preview = job.preview or long
         base = {
-            "items": sorted(self.knowledge.items),
-            "valid": sorted(i.item_id for i in self.knowledge.valid_items()),
-            "segments": sorted(self.knowledge.segments),
+            "items": sorted(self.knowledge.heads),
+            "valid": sorted(self.knowledge.ids(valid=True)),
+            "segments": sorted(self.knowledge.segment_ids()),
         }
         if preview:
             pdir = self._preview_dir(session)
@@ -156,6 +157,8 @@ class Rebuilds(DaemonState):
                 store.save()
                 if store is self.knowledge:
                     self.knowledge_dirty = False
+            # read while the preview's copy is still open
+            result = _rebuild_diff(base, store, done, summary, session, len(xs))
         except Exception as exc:
             log.warning("rebuilding %s failed: %s", session, exc)
             self.events.emit(
@@ -172,7 +175,6 @@ class Rebuilds(DaemonState):
         finally:
             if store is not self.knowledge:
                 store.close()
-        result = _rebuild_diff(base, store, done, summary, session, len(xs))
         if preview:
             (self._preview_dir(session) / "preview.json").write_text(json.dumps(result, indent=1))
         elif done:
@@ -205,7 +207,7 @@ class Rebuilds(DaemonState):
             return 0
         old = self.buffer.summaries(session)
         items = list(dict.fromkeys(i for g in done for i in g.items))
-        learned = [self.knowledge.items[i] for i in items if i in self.knowledge.items]
+        learned = self.knowledge.get_items(items)
         text = summary or "\n".join(f"[{i.type.value}] {i.statement}" for i in learned)
         return self.buffer.replace_summaries(
             session,
@@ -224,8 +226,8 @@ class Rebuilds(DaemonState):
                         [g for s in old for g in (*s.folded, s.segment) if g]
                         + [
                             g.segment_id
-                            for g in self.knowledge.segments.values()
-                            if g.session == session and g.segment_id != done[-1].segment_id
+                            for g in self.knowledge.segments(session=session)
+                            if g.segment_id != done[-1].segment_id
                         ]
                     )
                 ),
@@ -250,13 +252,13 @@ class Rebuilds(DaemonState):
         result = self.rebuild_preview(ref)
         session = result["session"]
         k = self.knowledge
-        if sorted(k.items) != result["base"]["items"] or (
-            sorted(k.segments) != result["base"]["segments"]
+        if sorted(k.heads) != result["base"]["items"] or (
+            sorted(k.segment_ids()) != result["base"]["segments"]
         ):
             raise ValueError("memory changed since the preview: run the preview again")
         pdir = self._preview_dir(session)
         preview = KnowledgeStore(pdir, self.embedder)
-        done = [preview.segments[g] for g in result["segments"] if g in preview.segments]
+        done = preview.segments(ids=result["segments"])
         # the preview's memory replaces this one: close it, copy the preview over it, open
         self.knowledge.close()
         preview.copy_to(self.cfg.home)
@@ -296,7 +298,7 @@ class Rebuilds(DaemonState):
             return
         k = self.knowledge
         taught = sorted(
-            (i for i in k.valid_items() if any(s.session == session for s in i.sources)),
+            k.get_items(i for i in k.taught_by(session) if k.heads[i].valid),
             key=lambda i: max(s.until for s in i.sources if s.session == session),
         )
         texts = [s.text for s in old if s.text and not s.text.startswith(NOTHING_PREFIX)]
@@ -312,7 +314,7 @@ class Rebuilds(DaemonState):
             self.events.emit("summaries_folded", session=session, ok=False, error=f"{exc}"[:300])
             return
         segs = [g for s in old for g in (*s.folded, s.segment) if g]
-        segs += [g.segment_id for g in k.segments.values() if g.session == session]
+        segs += [g.segment_id for g in k.segments(session=session)]
         segs = list(dict.fromkeys(segs))
         self.buffer.replace_summaries(
             session,
@@ -348,11 +350,14 @@ def _rebuild_diff(
     """What a rebuild changed, against the item ids memory had before it."""
     before = set(base["items"])
 
-    def brief(i: str) -> dict[str, Any]:
-        it = store.items[i]
-        return {"id": i, "type": it.type.value, "statement": it.statement, "valid": it.valid}
+    def briefs(ids: Iterable[str]) -> list[dict[str, Any]]:
+        return [
+            {"id": it.item_id, "type": it.type.value, "statement": it.statement, "valid": it.valid}
+            for it in store.get_items(ids)
+        ]
 
     touched = list(dict.fromkeys(i for g in done for i in g.items))
+    heads = store.heads
     return {
         "session": session,
         "exchanges": exchanges,
@@ -362,11 +367,10 @@ def _rebuild_diff(
         "end": done[-1].end.isoformat() if done else clock.now().isoformat(),
         "summary": summary,
         "base": base,
-        "new": [brief(i) for i in store.items if i not in before],
-        "matched": [brief(i) for i in touched if i in before],
-        "retired": [  # true before the rebuild, no longer true after it
-            brief(i) for i in base["valid"] if i in store.items and not store.items[i].valid
-        ],
+        "new": briefs(i for i in heads if i not in before),
+        "matched": briefs(i for i in touched if i in before),
+        # true before the rebuild, no longer true after it
+        "retired": briefs(i for i in base["valid"] if i in heads and not heads[i].valid),
     }
 
 

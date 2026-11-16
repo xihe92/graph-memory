@@ -162,7 +162,7 @@ class Graduating(DaemonState):
             return
         text = job.compact_summary if job.trigger == "compact" else written
         if not text:  # a model that wrote no summary: what it learned, if anything
-            learned = [self.knowledge.items[i] for i in segment.items if i in self.knowledge.items]
+            learned = self.knowledge.get_items(segment.items)
             text = "\n".join(f"[{i.type.value}] {i.statement}" for i in learned) or NOTHING_LEARNED
         self.buffer.summarize(
             session,

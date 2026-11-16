@@ -197,7 +197,7 @@ def test_a_crash_between_saving_knowledge_and_the_buffer_learns_nothing_twice(
         _graduate(cfg, "s", "idle")  # graduated again
         _wait(lambda: not d.buffer.exchanges("s"))
         assert d.knowledge.stats()["items"] == items  # the same statements: reinforced
-        assert all(i.strength == 2.0 for i in d.knowledge.items.values())
+        assert all(i.strength == 2.0 for i in d.knowledge.scan())
 
 
 def test_without_a_model_nothing_outlives_the_session(cfg: Config) -> None:
@@ -217,7 +217,7 @@ def test_abandoned_sessions_graduate_and_go(cfg: Config) -> None:
         clock.advance(days=8)
         assert call(cfg, "maintain", autostart=False)["queued"] == 1
         _wait(lambda: d.buffer.sessions() == [])
-        (seg,) = d.knowledge.segments.values()
+        (seg,) = d.knowledge.segments()
         assert seg.trigger == "abandoned"
         # a folder left holding only a summary goes too
         x = d.buffer.append("t", Exchange(prompt="x", reply="y"))
@@ -316,7 +316,7 @@ def test_a_live_session_shows_even_when_all_of_it_graduated(cfg: Config) -> None
         graduated, asking = sess["records"]
         assert graduated["kind"] == "graduated" and graduated["exchanges"] == 1
         assert {i["statement"] for i in graduated["items"]} == {
-            i.statement for i in d.knowledge.items.values()
+            i.statement for i in d.knowledge.scan()
         }
         assert all(i["new"] and i["valid"] for i in graduated["items"])
 

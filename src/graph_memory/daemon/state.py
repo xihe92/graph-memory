@@ -224,7 +224,7 @@ class DaemonState:
             scope = k.topic_key(want[len(TOPIC_PREFIX) :])
         else:
             repos = [
-                x for x in scope_names(i.scope for i in k.items.values()) if not x.get("topic")
+                x for x in scope_names(h.scope for h in k.heads.values()) if not x.get("topic")
             ]
             hits = [
                 x["key"] for x in repos if want in (x["key"], x["name"]) and x["key"] != "global"

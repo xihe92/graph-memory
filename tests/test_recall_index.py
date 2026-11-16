@@ -83,12 +83,12 @@ def test_any_sequence_of_changes_leaves_the_index_as_a_rebuild_would(
             elif op == 8:
                 k.confirm(pick.item_id)
             elif op == 9:
-                pick.scope = rng.choice(SCOPES)  # as rescope and `gm knowledge scope` do
+                k.edit(pick.item_id).scope = rng.choice(SCOPES)  # as `gm knowledge scope` does
                 k.touch(pick.item_id)
             elif op == 10:
                 k.invalidate(a.item_id, b, "replaced")
             elif op == 11:  # a deletion may have taken an entity no item names any more
-                alive = [e for e in ents if e.entity_id in k.entities]
+                alive = [e for e in ents if e.entity_id in k.names]
                 if alive:
                     k.merge_entity(rng.choice(alive).entity_id, f"alias {step}")
             elif op == 12 and len(items) > 6 and step % 40 == 0:
@@ -96,7 +96,7 @@ def test_any_sequence_of_changes_leaves_the_index_as_a_rebuild_would(
                 items.remove(pick)
                 if rng.random() < 0.5:
                     k.undelete(gone["batch"])
-                    items.append(k.items[pick.item_id])
+                    items.append(k.item(pick.item_id))
             if step % 3 == 0:  # the index reads the log now and then, not after each change
                 assert ix.differences() == [], f"after step {step}, op {op}"
         assert ix.differences() == []
@@ -110,13 +110,16 @@ def test_only_the_changed_items_are_redone(tmp_path: Path) -> None:
     b = k.add_item(Item(type=ItemType.FACT, statement="sqlite join table"))
     ix = KnowledgeIndex(k)
     ix.fresh()
-    doc_b = ix.docs[b.item_id]
+    k.save()
+    conn = k.backend.conn
+    before = conn.total_changes
     k.mark_used([a.item_id])
     ix.fresh()
-    assert ix.docs[b.item_id] is doc_b  # untouched: not rebuilt
+    assert conn.total_changes == before  # a's words are the same: none written again
     k.retract(a.item_id)
     ix.fresh()
-    assert a.item_id not in ix.live and a.item_id not in ix.docs
+    assert a.item_id not in ix.live and k.backend.words_of(a.item_id) == {}
+    assert k.backend.words_of(b.item_id)  # untouched
     assert ix.bm25(tokens("redis")) == [] and ix.bm25(tokens("sqlite"))[0][0] == b.item_id
 
 

@@ -16,8 +16,9 @@ from graph_memory import cli
 from graph_memory.buffer import SessionBuffer
 from graph_memory.client import call
 from graph_memory.config import load_config
-from graph_memory.knowledge import KnowledgeStore
+from graph_memory.knowledge import Item
 from graph_memory.migrate import apply, plan
+from graph_memory.storage import read_json
 
 from .test_daemon import _start
 
@@ -121,7 +122,7 @@ def test_plan_and_apply(short_dir: Path) -> None:
     raw = json.loads((short_dir / "knowledge.json").read_text())
     assert "cursors" not in raw and "evidence" not in raw["items"][0]
     assert raw["segments"][0]["exchanges"] == 1 and "compact_summary" not in raw["segments"][0]
-    (item,) = KnowledgeStore(short_dir).items.values()
+    (item,) = (Item.model_validate(i) for i in read_json(short_dir).items)
     assert [(s.session, s.until.isoformat()) for s in item.sources] == [
         ("claude-code:a", "2026-11-01T10:00:00+00:00")
     ]
@@ -140,6 +141,8 @@ def test_gm_migrate_refuses_while_the_daemon_runs(
     short_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     old_home(short_dir)
+    # the daemon runs on memory.db: here only the conversation graph is left to move
+    (short_dir / "knowledge.json").unlink()
     monkeypatch.setenv("GM_HOME", str(short_dir))
     monkeypatch.setattr(sys, "stdin", io.StringIO(""))
     assert cli.main(["migrate", "--dry-run"]) == 0
@@ -156,6 +159,7 @@ def test_gm_migrate_refuses_while_the_daemon_runs(
         call(cfg, "shutdown", autostart=False)
         t.join(5)
     assert cli.main(["migrate"]) == 0
-    assert "Done: 2 exchanges moved to the buffer" in capsys.readouterr().out
+    # with no knowledge.json there is no record of what graduated: all three move
+    assert "Done: 3 exchanges moved to the buffer" in capsys.readouterr().out
     assert cli.main(["migrate"]) == 0
     assert "Nothing to migrate" in capsys.readouterr().out

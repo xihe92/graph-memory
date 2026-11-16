@@ -15,9 +15,10 @@ from ..adapters.base import Turn, mentioned_files
 from ..buffer import Exchange, Summary
 from ..judge import build_judge_prompt, verdicts
 from ..knowledge import TOPIC_PREFIX, at_risk, in_view, named_topics
-from ..knowledge_recall import note, tokens, used_by
+from ..knowledge_recall import note, used_by
 from ..knowledge_recall import recall as knowledge_recall
 from ..projects import project_of
+from ..words import tokens
 from .state import DaemonState, log
 
 TOPIC_RECORDS = 40  # the session's latest exchanges and summaries read for its topics
@@ -48,7 +49,8 @@ class Turns(DaemonState):
             k = self.knowledge
             shown = self._shown.setdefault(session, set())
             since = self._last_compaction(session)
-            own = {i.item_id for i in k.valid_items() if in_view(i, session, since)}
+            taught = [i for i in k.taught_by(session) if k.heads[i].valid]
+            own = {i.item_id for i in k.get_items(taught) if in_view(i, session, since)}
             first = session not in self._greeted
             self._greeted.add(session)
             here = project_of([], cwd) if cwd else None
@@ -180,9 +182,7 @@ class Turns(DaemonState):
             self._background(self._check_use(session, recalled, turn.reply, ex.id))
             # a note that could have gone stale, or that nobody checked against a source,
             # is always judged; the rest, a sample
-            stale_risk = any(
-                at_risk(self.knowledge.items[i]) for i in recalled if i in self.knowledge.items
-            )
+            stale_risk = any(at_risk(i) for i in self.knowledge.get_items(recalled))
             if (
                 self.judge is not None
                 and self.cfg.knowledge_recall == "on"
@@ -207,10 +207,12 @@ class Turns(DaemonState):
             vec = await asyncio.to_thread(embed, reply[:4000]) if embed else None
             k = self.knowledge
             words = set(tokens(reply))
+            items = k.get_items(item_ids)
+            df = k.word_df(t for i in items for t in tokens(i.statement))  # one query for all
             used = [
-                i
-                for i in item_ids
-                if i in k.items and used_by(self.kindex, k.items[i], words, vec, k.vectors.get(i))
+                i.item_id
+                for i in items
+                if used_by(self.kindex, i, words, vec, k.vectors.get(i.item_id), df)
             ]
             k.mark_used(used)
             self.knowledge_dirty = True
@@ -230,7 +232,7 @@ class Turns(DaemonState):
         contradicted. A contradicted note is disputed: shown with a warning from then on,
         retracted when it happens again."""
         assert self.judge is not None
-        items = [self.knowledge.items[i] for i in item_ids if i in self.knowledge.items]
+        items = self.knowledge.get_items(item_ids)
         if not items:
             return
         started = time.perf_counter()
@@ -247,7 +249,7 @@ class Turns(DaemonState):
                 ok=True,
             )
             for item_id, (lab, why) in found.items():
-                if lab != "contradicted" or item_id not in self.knowledge.items:
+                if lab != "contradicted" or not self.knowledge.has(item_id):
                     continue
                 reason = why or f"contradicted by the reply to: {' '.join(prompt.split())[:80]}"
                 it = self.knowledge.dispute(item_id, reason)

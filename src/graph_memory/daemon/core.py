@@ -17,7 +17,6 @@ from typing import Any
 
 from .. import clock
 from ..events import prune_events
-from ..storage import json_note, sqlite_problem
 from .admin import Admin
 from .graduating import Graduating
 from .rebuild import Rebuilds
@@ -60,9 +59,6 @@ class Daemon(Turns, Graduating, Rebuilds, Admin, Summaries, Views):
         self.sweep(trigger="sweep")  # sessions left over from before this daemon started
         log.info("daemon listening on %s (pid %d)", sock, os.getpid())
         self.events.emit("daemon", op="start", pid=os.getpid(), storage=self.knowledge.backend.name)
-        note = json_note(self.knowledge.backend.name)
-        if note:
-            log.warning(note)
         self._start_ui()
         self.ready.set()
         try:
@@ -79,8 +75,8 @@ class Daemon(Turns, Graduating, Rebuilds, Admin, Summaries, Views):
             for t in tasks:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-            # everything once more, as insurance against a change that was never marked
-            self.knowledge.save(full=True)
+            # what changed since the last save
+            self.knowledge.save()
             self.knowledge.close()
             with contextlib.suppress(FileNotFoundError):
                 sock.unlink()
@@ -175,12 +171,9 @@ class Daemon(Turns, Graduating, Rebuilds, Admin, Summaries, Views):
             "pid": os.getpid(),
             "ui": self.ui.url if self.ui is not None else None,
             "buffer": self.buffer.stats(),
-            # the conversation graph from before the redesign is still on disk, or the
-            # memory is still in the JSON files from before SQLite and can move
-            "needs_migration": (self.cfg.home / "graph.json").exists()
-            or (self.knowledge.backend.name == "json" and sqlite_problem() is None),
+            # the conversation graph from before the redesign is still on disk
+            "needs_migration": (self.cfg.home / "graph.json").exists(),
             "storage": self.knowledge.backend.name,
-            "storage_note": json_note(self.knowledge.backend.name),
             "knowledge": {
                 **self.knowledge.stats(),
                 "graduation": self.ask is not None,

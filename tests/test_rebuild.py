@@ -120,7 +120,7 @@ def test_a_rebuild_replaces_the_old_summaries_and_counts_nothing_twice(
     ask = Script([{**LOCK, "summary": "Added a SETNX lock and retries to the limiter."}])
     with daemon_with(cfg, ask) as d:
         _old_session(d, session)
-        lock = next(iter(d.knowledge.items.values()))
+        lock = next(iter(d.knowledge.scan()))
         res = call(cfg, "regraduate", {"session": "5e55"}, autostart=False)
         assert res["session"] == session and res["queued"]
         _wait(lambda: any(e.get("trigger") == "rebuild" for e in _events(cfg, "graduate")))
@@ -132,7 +132,7 @@ def test_a_rebuild_replaces_the_old_summaries_and_counts_nothing_twice(
         assert "add a lock" in extract and "and retries?" in extract
         assert "rewound" not in extract and "still waiting" not in extract
         # what the session taught before is matched, not strengthened; the rest is new
-        assert lock.strength == 1.0 and len(d.knowledge.items) == 2
+        assert lock.strength == 1.0 and len(d.knowledge.heads) == 2
         recs = d.buffer.records(session)
         assert [r.kind for r in recs] == ["summary", "exchange"]
         summary = recs[0]
@@ -160,7 +160,7 @@ def test_a_rebuild_of_an_ended_session_keeps_no_buffer(
         call(cfg, "regraduate", {"session": SID}, autostart=False)
         _wait(lambda: bool(_events(cfg, "graduate")))
         _wait(d.settled)
-        assert len(d.knowledge.items) == 2 and d.buffer.sessions() == []
+        assert len(d.knowledge.heads) == 2 and d.buffer.sessions() == []
         (extract,) = [p for p in script.prompts if "distil" in p]
         assert "and retries?" in extract and "still waiting" not in extract
         with pytest.raises(RuntimeError, match="no transcript"):
@@ -256,7 +256,7 @@ def test_a_rebuild_whose_merge_fails_changes_nothing(
         _wait(d.settled)
         (ev,) = _events(cfg, "graduate")
         assert not ev["ok"] and "merge call failed twice" in ev["error"]
-        assert len(d.knowledge.items) == 1  # nothing added
+        assert len(d.knowledge.heads) == 1  # nothing added
         assert [r.model_dump() for r in d.buffer.records(session)] == before
 
 
@@ -304,7 +304,7 @@ def test_a_long_session_is_replayed_in_order(
         _wait(d.settled)
         (ev,) = _events(cfg, "graduate")
         assert ev["ok"] and ev["parts"] == 2 and ev["new"] == 2 and ev["retired"] == 0
-        by = {i.statement: i for i in d.knowledge.items.values()}
+        by = {i.statement: i for i in d.knowledge.scan()}
         assert not by[SETNX].valid and by[SETNX].invalidated_by == by[LUA].item_id
         extracts = [p for p in ask.prompts if "distil" in p]
         assert "<earlier>\nadded a SETNX lock\n</earlier>" in extracts[1]
@@ -341,11 +341,11 @@ def test_a_long_session_is_previewed_first_unless_forced(
         assert "gm knowledge regraduate 5e55-101 --apply" in out
         (ev,) = _events(cfg, "graduate")
         assert ev["ok"] and ev["preview"] and ev["long"]
-        assert d.knowledge.items == {}  # nothing changed yet
+        assert not d.knowledge.heads  # nothing changed yet
         assert cli.main(["knowledge", "regraduate", "5e55", "--force", "--wait"]) == 0
         assert "previewed first" not in capsys.readouterr().out
         assert not _events(cfg, "graduate")[-1]["preview"]
-        assert sorted(i.statement for i in d.knowledge.items.values()) == [LUA, SETNX]
+        assert sorted(i.statement for i in d.knowledge.scan()) == [LUA, SETNX]
 
 
 def test_history_is_matched_not_revived(
@@ -363,7 +363,7 @@ def test_history_is_matched_not_revived(
         _wait(lambda: bool(_events(cfg, "graduate")))
         _wait(d.settled)
         assert not old.valid  # matched by its statement, still history
-        assert sorted(i.statement for i in d.knowledge.items.values()) == [LUA, SETNX]
+        assert sorted(i.statement for i in d.knowledge.scan()) == [LUA, SETNX]
         (merge,) = [p for p in ask.prompts if "distil" not in p]
         assert "(NO LONGER TRUE since " in merge and "replaced by Lua)" in merge
 
@@ -391,8 +391,8 @@ def test_a_preview_changes_nothing_until_it_is_applied(
     )
     with daemon_with(cfg, ask) as d:
         _old_session(d, session)
-        (old_lock,) = d.knowledge.items.values()  # what the session taught before
-        before = ([r.model_dump() for r in d.buffer.records(session)], len(d.knowledge.items))
+        (old_lock,) = d.knowledge.scan()  # what the session taught before
+        before = ([r.model_dump() for r in d.buffer.records(session)], len(d.knowledge.heads))
         assert cli.main(["knowledge", "regraduate", "5e55", "--preview", "--wait"]) == 0
         out = capsys.readouterr().out
         assert "would add 1 items" in out and "retire 1" in out and LUA in out
@@ -400,16 +400,14 @@ def test_a_preview_changes_nothing_until_it_is_applied(
         # nothing changed yet
         assert (
             [r.model_dump() for r in d.buffer.records(session)],
-            len(d.knowledge.items),
+            len(d.knowledge.heads),
         ) == before
         assert old_lock.valid
 
         assert cli.main(["knowledge", "regraduate", "5e55", "--apply"]) == 0
         assert "1 new items, 1 no longer true, 2 summaries replaced" in capsys.readouterr().out
         k = d.knowledge
-        assert not k.items[old_lock.item_id].valid and any(
-            i.statement == LUA for i in k.items.values()
-        )
+        assert not k.item(old_lock.item_id).valid and any(i.statement == LUA for i in k.scan())
         assert [r.kind for r in d.buffer.records(session)] == ["summary", "exchange"]
         assert not (cfg.home / "rebuild-preview").exists() or not any(
             (cfg.home / "rebuild-preview").iterdir()
@@ -470,7 +468,7 @@ def test_resummarize_folds_a_sessions_summaries_and_leaves_knowledge_alone(
             )
         )
         d.knowledge.retract(gone.item_id, "replaced")
-        before = len(d.knowledge.items), d.knowledge.version
+        before = len(d.knowledge.heads), d.knowledge.version
 
         assert cli.main(["knowledge", "resummarize", "fold"]) == 0
         assert "3 summaries folded into one" in capsys.readouterr().out
@@ -483,7 +481,7 @@ def test_resummarize_folds_a_sessions_summaries_and_leaves_knowledge_alone(
         (prompt,) = asked
         assert "the current design" in prompt and "the first design" not in prompt
         assert "Nothing worth keeping" not in prompt and "later" in prompt
-        assert (len(d.knowledge.items), d.knowledge.version) == before  # knowledge untouched
+        assert (len(d.knowledge.heads), d.knowledge.version) == before  # knowledge untouched
 
         assert cli.main(["knowledge", "resummarize", "fold"]) == 0
         assert "nothing to fold" in capsys.readouterr().out

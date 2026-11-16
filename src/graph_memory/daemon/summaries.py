@@ -21,7 +21,7 @@ class Summaries(DaemonState):
     """`gm knowledge summarize` and the Knowledge page's brief."""
 
     def _scope_items(self, scope: str) -> list[Item]:
-        return [i for i in self.knowledge.valid_items() if i.scope == scope]
+        return list(self.knowledge.scan(valid=True, scope=scope))
 
     def _scope_label(self, scope: str) -> tuple[str, str]:
         """(short name, how the prompt and the page call it)."""
@@ -31,7 +31,7 @@ class Summaries(DaemonState):
         if name:
             return name, f"the topic {name}"
         names = {
-            x["key"]: x["name"] for x in scope_names(i.scope for i in self.knowledge.items.values())
+            x["key"]: x["name"] for x in scope_names(h.scope for h in self.knowledge.heads.values())
         }
         title = names.get(scope, scope.rsplit("/", 1)[-1])
         return title, f"the project {title}"
@@ -86,7 +86,7 @@ class Summaries(DaemonState):
             left_out=left_out,
             notes={i.item_id: stamp(i) for i in items},
         )
-        valid = {i.scope for i in self.knowledge.valid_items()}
+        valid = {h.scope for h in self.knowledge.heads.values() if h.valid}
         kept = {k: v for k, v in self._summaries().items() if k in valid}  # drop empty scopes
         kept[scope] = brief
         self.knowledge.set_summaries(kept)

@@ -69,8 +69,8 @@ def test_graduation_records_sources_and_reinforcing_adds_one(tmp_path: Path) -> 
         return SegmentInput(session, xs, "session_end", "repo:/w/limiter", "limiter")
 
     graduate(k, seg("s1", T0), Script([LOCK]), topic_embed)
-    lock = next(i for i in k.items.values() if "SETNX" in i.statement)
-    retries = next(i for i in k.items.values() if "retries" in i.statement)
+    lock = next(i for i in k.scan() if "SETNX" in i.statement)
+    retries = next(i for i in k.scan() if "retries" in i.statement)
     # each item's time is the newest exchange that taught it (its evidence), not the end
     assert [(s.session, s.until) for s in lock.sources] == [("s1", T0)]
     assert retries.sources[0].until == T0 + timedelta(minutes=1)
@@ -81,10 +81,12 @@ def test_graduation_records_sources_and_reinforcing_adds_one(tmp_path: Path) -> 
 
 
 def test_items_from_before_sources_get_them_from_their_segments(tmp_path: Path) -> None:
-    from graph_memory.storage import JsonBackend
+    import sqlite3
 
-    # such items only exist in the JSON files written before sources (and before SQLite)
-    k = KnowledgeStore(tmp_path, topic_embed, backend=JsonBackend(tmp_path))
+    from graph_memory import migrate
+    from graph_memory.migrate import export_json
+
+    k = KnowledgeStore(tmp_path / "work", topic_embed)
     graduate(
         k,
         SegmentInput("s1", (Exchange("x1", T0, "add a lock", "done"),), "session_end"),
@@ -92,13 +94,25 @@ def test_items_from_before_sources_get_them_from_their_segments(tmp_path: Path) 
         topic_embed,
     )
     k.save()
-    data = json.loads((tmp_path / "knowledge.json").read_text())
+    # such items exist in the JSON files written before sources: `gm migrate` gives them
+    # theirs on the way into memory.db
+    old = tmp_path / "old"
+    export_json(k, old)
+    data = json.loads((old / "knowledge.json").read_text())
     for i in data["items"]:
         i.pop("sources")  # as written before this change
-    (tmp_path / "knowledge.json").write_text(json.dumps(data))
-    again = KnowledgeStore(tmp_path, topic_embed)  # finds the JSON files: reads them
-    assert again.backend.name == "json"
-    (seg,) = again.segments.values()
-    for it in again.items.values():
-        assert [(s.session, s.until) for s in it.sources] == [("s1", seg.end)]
-    assert seg.end == T0
+    (old / "knowledge.json").write_text(json.dumps(data))
+    migrate.sqlite_apply(migrate.sqlite_plan(old))
+    # and a memory.db holding one without them gets them when it is opened
+    k.close()
+    conn = sqlite3.connect(tmp_path / "work" / "memory.db")
+    conn.execute("UPDATE item SET body = json_set(body, '$.sources', json('[]'))")
+    conn.commit()
+    conn.close()
+    for home in (old, tmp_path / "work"):
+        again = KnowledgeStore(home, topic_embed)
+        (seg,) = again.segments()
+        for it in again.scan():
+            assert [(s.session, s.until) for s in it.sources] == [("s1", seg.end)]
+            assert again.heads[it.item_id].sessions == ("s1",)
+        assert seg.end == T0

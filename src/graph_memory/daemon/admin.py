@@ -27,7 +27,7 @@ class Admin(DaemonState):
     def _item_ref(self, ref: str) -> str:
         """The item id an id or unambiguous prefix names."""
         ref = ref.strip()
-        hits = [i for i in self.knowledge.items if ref and i.startswith(ref)]
+        hits = [i for i in self.knowledge.heads if ref and i.startswith(ref)]
         if len(hits) != 1:
             raise KeyError(f"{'no' if not hits else 'ambiguous'} knowledge item {ref!r}")
         return hits[0]
@@ -90,7 +90,7 @@ class Admin(DaemonState):
             raise KeyError("no items to scope")
         scope = self._scope_ref(to)
         for i in ids:
-            k.items[i].scope = scope
+            k.edit(i).scope = scope
         k.touch(*ids)
         k.save()
         self.knowledge_dirty = False
@@ -104,15 +104,15 @@ class Admin(DaemonState):
             raise GraduationError("no model to ask")
         self._grad_queued[RESCOPE_JOB] += 1
         self.grad_queue.put_nowait(Job(RESCOPE_JOB, RESCOPE))
-        return {"queued": True, "items": sum(1 for _ in self.knowledge.valid_items())}
+        return {"queued": True, "items": len(self.knowledge.ids(valid=True))}
 
     async def _rescope(self, job: Job) -> None:
-        from ..rescope import propose
+        from ..rescope import inputs, propose
 
         started = time.perf_counter()
         assert self.ask is not None
         try:
-            changes = await asyncio.to_thread(propose, self.knowledge, self.ask)
+            changes = await asyncio.to_thread(propose, *inputs(self.knowledge), self.ask)
         except Exception as exc:
             log.warning("rescoping failed: %s", exc)
             self.events.emit(RESCOPE, ok=False, error=f"{type(exc).__name__}: {exc}"[:300])
@@ -144,12 +144,12 @@ class Admin(DaemonState):
         k = self.knowledge
         done, kept = [], []
         for c in plan["changes"]:
-            it = k.items.get(c["id"])
-            if it is None or it.scope != c["from"]:
+            h = k.heads.get(c["id"])
+            if h is None or h.scope != c["from"]:
                 kept.append(c["id"])
                 continue
             name = topic_of(c["to"])
-            it.scope = (k.topic_key(name) or c["to"]) if name else c["to"]
+            k.edit(c["id"]).scope = (k.topic_key(name) or c["to"]) if name else c["to"]
             k.touch(c["id"])
             done.append(c["id"])
         k.save()

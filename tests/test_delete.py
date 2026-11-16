@@ -56,7 +56,7 @@ def _edge(k: KnowledgeStore, a: str, b: str) -> list[tuple[str, str, str, float,
             e.weight,
             e.origin,
         )
-        for e in k.edges.values()
+        for e in k.scan_edges()
         if {e.source, e.target} == {a, b}
     ]
 
@@ -64,11 +64,11 @@ def _edge(k: KnowledgeStore, a: str, b: str) -> list[tuple[str, str, str, float,
 def test_delete_bridges_the_neighbours_and_undelete_puts_it_back(tmp_path: Path) -> None:
     k, ids = _store(tmp_path)
     a, x, b, c = ids["a"], ids["x"], ids["b"], ids["c"]
-    before_edges = {key: e.weight for key, e in k.edges.items()}
+    before_edges = dict(k.links)
     batch = k.delete([x], reason="noise")
 
-    assert x not in k.items and k.vectors.get(x) is None
-    assert not any(x in (e.source, e.target) for e in k.edges.values())
+    assert not k.has(x) and k.vectors.get(x) is None
+    assert not any(x in (e.source, e.target) for e in k.scan_edges())
     # a depends on x, x depends on b: a depends on b, as strong as both links together
     assert _edge(k, a, b) == [(a, b, "depends_on", 0.54, "bridge")]
     # b and c: a weak same_area bridge (0.6 x 0.3)
@@ -76,7 +76,7 @@ def test_delete_bridges_the_neighbours_and_undelete_puts_it_back(tmp_path: Path)
     # a and c share the specific entity "cache": already close, no bridge
     assert _edge(k, a, c) == []
     # the entities only x named are gone, the others stay
-    names = {e.name for e in k.entities.values()}
+    names = {e.name for e in k.scan_entities()}
     assert "queue" not in names and "lonely" not in names and "cache" in names
     assert k.entity_by_name("queue") is None
     assert len(k.deleted()) == 1 and batch["reason"] == "noise"
@@ -84,8 +84,8 @@ def test_delete_bridges_the_neighbours_and_undelete_puts_it_back(tmp_path: Path)
     k.save()
     again = KnowledgeStore(tmp_path, topic_embed)
     again.undelete(batch["batch"])
-    assert x in again.items and again.vectors.get(x) is not None
-    assert {key: e.weight for key, e in again.edges.items()} == before_edges  # bridges gone
+    assert again.has(x) and again.vectors.get(x) is not None
+    assert dict(again.links) == before_edges  # bridges gone
     assert again.entity_by_name("queue") is not None
     assert again.deleted() == []
     with pytest.raises(KeyError):
@@ -125,7 +125,7 @@ def test_bridges_are_capped_and_skip_weak_pairs(tmp_path: Path) -> None:
     for n, s in enumerate(spokes):
         k.add_edge(hub, s, Relation.SAME_AREA, 0.9 if n < 8 else 0.1)
     k.delete([hub])
-    bridges = [e for e in k.edges.values() if e.origin == "bridge"]
+    bridges = [e for e in k.scan_edges() if e.origin == "bridge"]
     assert len(bridges) == BRIDGE_MAX  # not 45 pairs
     assert all(e.weight == 0.81 for e in bridges)  # the strongest first
 
@@ -136,10 +136,10 @@ def test_no_bridge_through_superseded_items_and_replacement_links_survive(tmp_pa
     new = k.add_item(Item(type=ItemType.DECISION, statement="use a Lua script for the limiter"))
     k.invalidate(old.item_id, new, "replaced")
     batch = k.delete([new.item_id])
-    assert batch["bridges"] == [] and k.items[old.item_id].invalidated_by is None
+    assert batch["bridges"] == [] and k.item(old.item_id).invalidated_by is None
     k.undelete(batch["batch"])
-    assert k.items[old.item_id].invalidated_by == new.item_id
-    assert (new.item_id, old.item_id, "supersedes") in k.edges
+    assert k.item(old.item_id).invalidated_by == new.item_id
+    assert (new.item_id, old.item_id, "supersedes") in k.links
 
 
 def test_deleting_nothing_known_is_an_error(tmp_path: Path) -> None:

@@ -63,8 +63,8 @@ uv tool install --managed-python --editable ./graph-memory   # puts `gm` on your
 `--managed-python` installs graph-memory on uv's own Python build. Memory is kept in
 SQLite and searched with the [sqlite-vec](https://github.com/asg017/sqlite-vec)
 extension, and Python's `sqlite3` module can load extensions there; some Python builds
-(pyenv's default, the macOS system Python) leave that out. On such a Python memory is
-kept in JSON files instead, and `gm status` says why.
+(pyenv's default, the macOS system Python) leave that out, and on them the daemon does
+not start (`~/.graph-memory/gm.log` says why).
 
 The first daemon start downloads the embedding model (all-MiniLM-L6-v2, about 90 MB,
 pinned and checked against its SHA-256) from Hugging Face to
@@ -373,27 +373,33 @@ and open items. Pick a scope on the Knowledge page and press **Summarize**, or r
 ## Where memory is kept
 
 `~/.graph-memory/memory.db` is one SQLite file (in WAL mode): a table per kind of record
-(items, entities, edges, graduations), the deletions you can undo, the summaries, and the
-vectors in a [sqlite-vec](https://github.com/asg017/sqlite-vec) table.
+(items, entities, edges, graduations), the deletions you can undo, the summaries, the
+vectors in a [sqlite-vec](https://github.com/asg017/sqlite-vec) table, and recall's word
+index (each note's words and how often they occur).
 
-- **Only what changed is written.** The daemon notes which records a request changed and
-  writes those rows, with their vectors, in one transaction: a crash leaves the memory
+- **The daemon holds only what recall needs.** For each note: its type, scope, whether it
+  is still true, the fields its strength is worked out from, its entities and the
+  sessions that taught it. For each entity its names, and for each link its weight. The
+  text of a note, its reason, sources and everything else are read from `memory.db` by
+  id when needed: the few notes a recall shows, the notes a graduation compares new
+  ones with, the note a page opens.
+- **Only what changed is written.** A changed note is kept until the next save, which
+  writes its row, its vector and its words in one transaction: a crash leaves the memory
   as it was at the last save, never half of one.
-- **The vector search runs in SQLite.** Each vector row carries its note's scope and
-  whether it can be recalled now, so a recall's search for the 12 closest notes is
-  limited to the session's scopes inside the scan. Nothing about vectors is held in
-  Python's memory.
-- **At 10,000 notes** (a synthetic memory): the daemon starts reading it in about
-  0.3 s, a save after a reply takes well under a millisecond, and a recall about 8 ms.
-  The file is about 40 MB.
+- **The searches run in SQLite.** Each vector row carries its note's scope and whether
+  it can be recalled now, so a recall's search for the 12 closest notes is limited to
+  the session's scopes inside the scan. Word search (BM25) is one query over the word
+  index, limited the same way.
+- **At 10,000 notes** (a copy of a real memory, scaled up): the daemon holds about
+  23 MB for it, starts reading it in about 0.15 s, and a recall takes about 11 ms. The
+  file is about 73 MB.
 
-**JSON files.** On a Python that cannot load SQLite extensions, memory is kept in JSON
-files instead (`knowledge.json`, `knowledge_vectors.json`, `knowledge_deleted.jsonl`,
-`summaries.json`), searched in memory. `gm status` says so in `storage_note`. To move
-such a memory into `memory.db` once SQLite can be used: `gm stop`, then `gm migrate`
-(`--dry-run` shows what will move). It copies everything into a new database, compares
-the copy with the JSON files record by record and changes nothing on any difference,
-then packs the JSON files into `archive-<date>-json.tar.gz` and removes them.
+**JSON files.** A memory from before SQLite, kept in JSON files (`knowledge.json`,
+`knowledge_vectors.json`, `knowledge_deleted.jsonl`, `summaries.json`), is moved into
+`memory.db` with `gm stop`, then `gm migrate` (`--dry-run` shows what will move); until
+then the daemon does not start. It copies everything into a new database, compares the
+copy with the JSON files record by record and changes nothing on any difference, then
+packs the JSON files into `archive-<date>-json.tar.gz` and removes them.
 
 `gm export [folder]` writes memory out as JSON files at any time.
 

@@ -440,7 +440,7 @@ class Simulator:
     def items(self, key: str, valid_only: bool = False) -> list[Item]:
         out = [
             i
-            for i in self.store.items.values()
+            for i in self.store.scan()
             if key in self.keys_of(i.statement) and (i.valid or not valid_only)
         ]
         return sorted(out, key=lambda i: i.created_at)
@@ -489,12 +489,11 @@ class Simulator:
                 )
                 # ... and what is on disk is what the daemon holds: no change went unsaved
                 from ..knowledge import KnowledgeStore
-                from ..storage import differences
 
                 self.daemon.knowledge.save()
                 disk = KnowledgeStore(self.cfg.home)
                 try:
-                    diff = differences(self.daemon.knowledge, disk)
+                    diff = self.daemon.knowledge.differences(disk)
                 finally:
                     disk.close()
                 self.outcomes.append(
@@ -578,7 +577,8 @@ class Simulator:
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = cli.main(argv)
         self._new_events()
-        ok = code == 0 and it.valid == step.restore
+        now = self.store.item(it.item_id)
+        ok = code == 0 and now is not None and now.valid == step.restore
         return Outcome(n, kind, step.label, ok, (out.getvalue() + err.getvalue()).strip())
 
     def _recall(self, ses: SimSession, prompt: str) -> tuple[list[str], dict[str, Any] | None]:
@@ -601,9 +601,7 @@ class Simulator:
             lines = [ln[2:] for ln in block.splitlines() if ln.startswith("- ")]
         if self.recall_mode != "on" and ev is not None:  # shadow: judge what it would show
             lines = [
-                f"[{self.store.items[i].type.value}] {self.store.items[i].statement}"
-                for i in ev.get("items", [])
-                if i in self.store.items
+                f"[{i.type.value}] {i.statement}" for i in self.store.get_items(ev.get("items", []))
             ]
         return lines, ev
 
@@ -694,9 +692,8 @@ class Simulator:
             )
             used = set()
             if use is not None:
-                for i in use.get("used", []):
-                    if i in self.store.items:
-                        used |= self.keys_of(self.store.items[i].statement)
+                for it in self.store.get_items(use.get("used", [])):
+                    used |= self.keys_of(it.statement)
             for k in st.used:
                 if k in used:
                     self.tally.use_tp += 1
@@ -873,7 +870,7 @@ class Simulator:
                     "strength": i.strength,
                     "uses": i.uses,
                 }
-                for i in sorted(self.store.items.values(), key=lambda i: i.created_at)
+                for i in sorted(self.store.scan(), key=lambda i: i.created_at)
             ],
         )
 

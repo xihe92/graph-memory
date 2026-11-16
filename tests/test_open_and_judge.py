@@ -284,12 +284,13 @@ def test_a_contradicted_note_is_disputed_then_retracted(cfg: Config) -> None:
         assert len(_turn(cfg, "s1", "sqlite foreign keys default", "Off, per the docs.")) == 1
         _wait(lambda: bool(_events(cfg, "knowledge_dispute")))
         _wait(d.settled)
-        it = d.knowledge.items[ids.item_id]
+        it = d.knowledge.item(ids.item_id)
         assert it.disputes == 1 and it.valid
         (line,) = _turn(cfg, "s2", "sqlite foreign keys default", "Off again.")
         assert "[disputed " in line and "the docs say they are off by default" in line
         _wait(lambda: len(_events(cfg, "knowledge_dispute")) == 2)
         _wait(d.settled)
+        it = d.knowledge.item(ids.item_id)
         assert not it.valid and "contradicted 2 times" in it.invalid_reason
         assert _turn(cfg, "s3", "sqlite foreign keys default", "Off.") == []
     first, second = _events(cfg, "knowledge_dispute")

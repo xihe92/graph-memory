@@ -456,11 +456,12 @@ def _summarized(project: str, has: list[str], lacks: list[str]) -> Check:
         if not cited:
             return "the summary cites nothing"
         scope = brief["scope"]
-        stray = [n for n in cited if n not in sim.store.items or not sim.store.items[n].valid]
-        stray += [n for n in cited if n in sim.store.items and sim.store.items[n].scope != scope]
+        heads = sim.store.heads
+        stray = [n for n in cited if n not in heads or not heads[n].valid]
+        stray += [n for n in cited if n in heads and heads[n].scope != scope]
         if stray:
             return f"cites notes that are not true or not in {project}: {stray}"
-        keys = {k for n in cited for k in sim.keys_of(sim.store.items[n].statement)}
+        keys = {k for it in sim.store.get_items(cited) for k in sim.keys_of(it.statement)}
         bad = [k for k in lacks if k in keys]
         if sim.oracle is not None:
             bad += [f"missing {k}" for k in has if k not in keys]
@@ -480,7 +481,7 @@ def _summary_changed(project: str, at_least: int) -> Check:
 
 def _item_count(n: int) -> Check:
     def check(sim: Simulator) -> str | None:
-        got = len(sim.store.items)
+        got = len(sim.store.heads)
         return None if got == n else f"{got} items in memory, want {n}"
 
     return check
@@ -650,7 +651,7 @@ def _edges(sim: Simulator, a: str, b: str) -> list[str]:
     ib = {i.item_id for i in sim.items(b)}
     return [
         e.origin
-        for e in sim.store.edges.values()
+        for e in sim.store.scan_edges()
         if (e.source in ia and e.target in ib) or (e.source in ib and e.target in ia)
     ]
 
