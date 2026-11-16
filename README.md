@@ -72,11 +72,12 @@ Or the same by hand, from a clone:
 
 ```sh
 git clone https://github.com/xihe92/graph-memory
-uv tool install --managed-python --editable ./graph-memory   # puts `gm` on your PATH
-gm setup                                                     # adds the hooks
+uv tool install --managed-python --python 3.12 --editable ./graph-memory   # puts `gm` on PATH
+gm setup                                                                   # adds the hooks
 ```
 
-`--managed-python` installs graph-memory on uv's own Python build. Memory is kept in
+`--managed-python --python 3.12` installs graph-memory on uv's own build of Python 3.12
+(3.11 to 3.14 work; onnxruntime does not ship for newer ones yet). Memory is kept in
 SQLite and searched with the [sqlite-vec](https://github.com/asg017/sqlite-vec)
 extension, and Python's `sqlite3` module can load extensions there; some Python builds
 (pyenv's default, the macOS system Python) leave that out, and on them the daemon does

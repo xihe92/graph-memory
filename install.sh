@@ -4,7 +4,7 @@
 #   curl -LsSf https://raw.githubusercontent.com/xihe92/graph-memory/main/install.sh | sh
 #
 # It installs uv if it is missing (https://docs.astral.sh/uv/), installs graph-memory
-# with it on uv's own Python, then runs `gm setup`, which merges the hooks into
+# with it on uv's own Python 3.12, then runs `gm setup`, which merges the hooks into
 # ~/.claude/settings.json (backed up first). Running it again updates graph-memory.
 # GM_SOURCE installs from somewhere else: another git URL, or a local folder.
 set -eu
@@ -33,7 +33,8 @@ if ! command -v uv > /dev/null 2>&1; then
 fi
 
 say "installing graph-memory from $SOURCE"
-uv tool install --managed-python --reinstall "$SOURCE"
+# a Python its dependencies ship for (onnxruntime lags the newest Python by months)
+uv tool install --managed-python --python 3.12 --reinstall "$SOURCE"
 
 GM="$(uv tool dir --bin)/gm"
 [ -x "$GM" ] || fail "the install did not leave $GM"
