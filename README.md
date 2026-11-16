@@ -40,9 +40,32 @@ It needs Claude Code on macOS or Linux; the installer brings the rest (uv, and P
 3.11 or later through it). The model calls go through `claude -p` with your existing
 login.
 
-**[How it works](https://claude.ai/artifact/XrMqJVbNAjrivracZamnyz)** walks through
-remembering, recall, how memory ages, summaries and the Knowledge page, with diagrams and
-examples. The rest of this README is the reference.
+## How it works
+
+Claude Code's hooks call `gm`, which hands each event to a small local daemon. Four
+things happen:
+
+1. **Before each reply: recall.** The daemon finds notes close in meaning to your
+   prompt and notes that share its rarer words, among those of the session's project,
+   the topics the session is about and your global notes. It then follows the links
+   between notes (Personalized PageRank), so a related reason or pitfall comes along,
+   and picks at most 6 notes (about 1,800 characters). They reach Claude in a
+   `<graph-memory>` block above your prompt. No model is called; it takes about 7 ms.
+2. **After each reply: remember.** The exchange is added to the session's buffer. In the
+   background the daemon checks whether the reply used the notes it was shown: used
+   notes get stronger, and notes used together get linked.
+3. **When the session goes quiet, compacts or ends: graduate.** A small model (Haiku,
+   through `claude -p`) reads the waiting exchanges with the session's summary so far
+   and writes down what is worth keeping. Each new note is compared with what memory
+   already has: a repeat strengthens the old note, a reversal retires it, and related
+   notes are linked. Then the exchanges are deleted.
+4. **Over time: aging.** Notes that are never used fade and stop being recalled,
+   fast-changing facts get a date to be checked again, and a note a reply contradicts
+   is marked disputed.
+
+The sections below go into each part: [the session buffer](#the-session-buffer), the
+[knowledge graph](#knowledge-graph), [recall](#recall), the [web page](#web-page) and
+[where memory is kept](#where-memory-is-kept).
 
 ```
 agent hook ──▶ gm (exits in ms) ──Unix socket──▶ daemon ──▶ ~/.graph-memory/
