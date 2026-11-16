@@ -36,8 +36,9 @@ What is different about it:
 
 *A summary of one project. Each number opens the note the point rests on.*
 
-It needs Claude Code, Python 3.11 or later and [uv](https://docs.astral.sh/uv/). The
-model calls go through `claude -p` with your existing login.
+It needs Claude Code on macOS or Linux; the installer brings the rest (uv, and Python
+3.11 or later through it). The model calls go through `claude -p` with your existing
+login.
 
 **[How it works](https://claude.ai/artifact/XrMqJVbNAjrivracZamnyz)** walks through
 remembering, recall, how memory ages, summaries and the Knowledge page, with diagrams and
@@ -55,9 +56,24 @@ agent hook ──▶ gm (exits in ms) ──Unix socket──▶ daemon ──�
 
 ## Install
 
+On macOS or Linux, with Claude Code installed:
+
+```sh
+curl -LsSf https://raw.githubusercontent.com/xihe92/graph-memory/main/install.sh | sh
+```
+
+The script installs [uv](https://docs.astral.sh/uv/) if it is missing, installs
+graph-memory with it, and runs `gm setup`, which adds the hooks below to
+`~/.claude/settings.json`. Your other hooks and settings stay as they are, and the file
+is backed up first. New Claude Code sessions then use memory. Running the line again
+updates graph-memory.
+
+Or the same by hand, from a clone:
+
 ```sh
 git clone https://github.com/xihe92/graph-memory
 uv tool install --managed-python --editable ./graph-memory   # puts `gm` on your PATH
+gm setup                                                     # adds the hooks
 ```
 
 `--managed-python` installs graph-memory on uv's own Python build. Memory is kept in
@@ -69,21 +85,33 @@ not start (`~/.graph-memory/gm.log` says why).
 The first daemon start downloads the embedding model (all-MiniLM-L6-v2, about 90 MB,
 pinned and checked against its SHA-256) from Hugging Face to
 `~/.cache/graph-memory/models`. It then runs offline on the CPU. Graduation calls
-`claude -p --model haiku` with your existing login.
+`claude -p --model haiku` with your existing login, so it counts toward your Claude usage
+(usually two calls per graduation).
+
+**If `gm` is something else on your machine.** oh-my-zsh's git plugin makes `gm` an
+alias for `git merge`, and GraphicsMagick installs a program called `gm`. The hooks are
+not affected: `gm setup` writes graph-memory's full path into them. In a terminal, call
+it by that path (`~/.local/bin/gm` by default) or as `\gm` to skip the alias.
+
+**To uninstall:** `gm setup --remove` takes the hooks out, `gm stop` stops the daemon,
+and `uv tool uninstall graph-memory` removes the program. Memory stays in
+`~/.graph-memory/` until you delete it.
 
 ## Claude Code hooks
 
-Add to `~/.claude/settings.json` (all projects) or `.claude/settings.json` (one project):
+`gm setup` adds these to `~/.claude/settings.json` (`--settings .claude/settings.json`
+for one project instead, `--dry-run` to see what would change). By hand, with `gm`'s
+full path in place of `gm`:
 
 ```json
 {
   "hooks": {
-    "SessionStart":     [{ "hooks": [{ "type": "command", "command": "gm start" }] },
+    "SessionStart":     [{ "hooks": [{ "type": "command", "command": "gm start", "timeout": 30 }] },
                          { "matcher": "compact",
-                           "hooks": [{ "type": "command", "command": "gm graduate" }] }],
-    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "gm recall" }] }],
-    "Stop":             [{ "hooks": [{ "type": "command", "command": "gm remember" }] }],
-    "SessionEnd":       [{ "hooks": [{ "type": "command", "command": "gm graduate" }] }]
+                           "hooks": [{ "type": "command", "command": "gm graduate", "timeout": 15 }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "gm recall", "timeout": 15 }] }],
+    "Stop":             [{ "hooks": [{ "type": "command", "command": "gm remember", "timeout": 15 }] }],
+    "SessionEnd":       [{ "hooks": [{ "type": "command", "command": "gm graduate", "timeout": 15 }] }]
   }
 }
 ```
@@ -104,6 +132,7 @@ an action's.
 
 | Command | What it does |
 |---|---|
+| `gm setup [--remove] [--dry-run]` | Add graph-memory's hooks to Claude Code's settings, or take them out |
 | `gm status` | Buffer (sessions and exchanges waiting), knowledge counts, graduation queue |
 | `gm knowledge` | Items by type, with their entities (`--all` includes ones no longer true) |
 | `gm knowledge show <id>` | One item or entity, its neighbours and the graduations it came from |

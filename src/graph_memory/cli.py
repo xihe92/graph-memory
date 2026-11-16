@@ -609,6 +609,32 @@ def _review(cfg: Config) -> int:
     return 0
 
 
+def _setup(args: argparse.Namespace) -> int:
+    from .claude_setup import setup
+
+    path = Path(args.settings).expanduser() if args.settings else None
+    try:
+        res = setup(path, remove=args.remove, dry_run=args.dry_run)
+    except ValueError as exc:
+        print(f"gm setup: {exc}", file=sys.stderr)
+        return 1
+    what = "taken out of" if args.remove else "added to"
+    if not res.changed:
+        state = "not in" if args.remove else "already in"
+        print(f"graph-memory's hooks are {state} {res.path}; nothing changed")
+    elif args.dry_run:
+        print(f"graph-memory's hooks would be {what} {res.path} (dry run: nothing written)")
+    else:
+        print(f"graph-memory's hooks {what} {res.path}")
+        if res.backup:
+            print(f"  the file as it was: {res.backup}")
+        if not args.remove:
+            print("  new Claude Code sessions use them; the first prompt starts the daemon")
+    for note in res.notes:
+        print(f"note: {note}", file=sys.stderr)
+    return 0
+
+
 def _knowledge_actions(actions: Any) -> None:
     """`gm knowledge <action>`: each action with only the options it takes. A missing id
     is reported by the action itself, with what it needs."""
@@ -721,6 +747,16 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument(
             "--agent", default="claude-code", help="adapter: built-in name or package.module:Class"
         )
+    sp = sub.add_parser(
+        "setup",
+        help="add graph-memory's hooks to Claude Code's settings (--remove takes them out)",
+        description="Merges graph-memory's hooks into ~/.claude/settings.json: other hooks "
+        "and settings stay, the file is backed up first, and running it again changes "
+        "nothing.",
+    )
+    sp.add_argument("--remove", action="store_true", help="take graph-memory's hooks out")
+    sp.add_argument("--dry-run", action="store_true", help="say what would change, write nothing")
+    sp.add_argument("--settings", default=None, help="another settings file (e.g. a project's)")
     sub.add_parser("status", help="show daemon, buffer and knowledge status")
     kp = sub.add_parser(
         "knowledge",
@@ -751,6 +787,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     ep.add_argument("dest", nargs="?", help="folder (default ~/graph-memory-export-<date>)")
     args = parser.parse_args(argv)
+    if args.cmd == "setup":  # before the config: it touches only Claude Code's settings
+        return _setup(args)
 
     is_hook = args.cmd in ("start", "recall", "remember", "graduate")
     try:
