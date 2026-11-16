@@ -185,7 +185,8 @@ entity ◀─about─ item ─related(type, weight)─▶ item
 - **Sources** replace links to exchanges, which are gone once graduated: one entry per
   session that taught the item, with the time of the newest exchange that did.
 
-**Graduation pipeline** (two model calls per segment, in the background):
+**Graduation pipeline** (in the background: one extract call per 40,000 characters of
+exchanges, plus one merge call when new items need comparing with existing ones):
 
 1. *Extract*: the exchanges (with the pages read and searches run in each, plus the
    session's summary so far, or Claude's own after a compaction) go to the model, which
@@ -399,8 +400,8 @@ then packs the JSON files into `archive-<date>-json.tar.gz` and removes them.
 ### Secrets
 
 Text is redacted as it reaches the daemon, before anything stores it, embeds it or sends
-it to a model. That covers the prompt at recall; the prompt, reply, commands and pages of
-each finished turn; a compaction summary; and the turns `gm knowledge regraduate` reads
+it to a model. That covers the prompt at recall; the prompt, reply, commands, pages and
+subagent tasks and results of each finished turn; a compaction summary; and the turns `gm knowledge regraduate` reads
 from a transcript. What a model answers is redacted too, so a note cannot carry a secret
 the model was shown. A match becomes `[redacted: <kind>]`:
 
