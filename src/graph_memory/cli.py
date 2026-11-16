@@ -609,6 +609,104 @@ def _review(cfg: Config) -> int:
     return 0
 
 
+def _knowledge_actions(actions: Any) -> None:
+    """`gm knowledge <action>`: each action with only the options it takes. A missing id
+    is reported by the action itself, with what it needs."""
+
+    def action(name: str, about: str, what: str = "", help_: str = "") -> argparse.ArgumentParser:
+        p: argparse.ArgumentParser = actions.add_parser(name, help=about, description=about)
+        if what:
+            p.add_argument("id", nargs="*", metavar=what, help=help_)
+        return p
+
+    p = action("list", "every item by type, with its entities (the default)")
+    # SUPPRESS: `gm knowledge --all` keeps its value when `list` is named after it
+    p.add_argument(
+        "--all", action="store_true", default=argparse.SUPPRESS, help="include items no longer true"
+    )
+    action(
+        "show",
+        "one item or entity, its neighbours and the graduations it came from",
+        "ID",
+        "an item or entity id (a prefix will do)",
+    )
+    action("backfill", "graduate every session waiting in the buffer now")
+    p = action(
+        "retract",
+        "mark an item no longer true: kept for history, never recalled",
+        "ID",
+        "an item id (a prefix will do)",
+    )
+    p.add_argument("--reason", default="", help="why it is no longer true")
+    for name, about in (
+        ("restore", "make an item true again (undoes a retraction or the model's)"),
+        ("confirm", "it still holds: clears a dispute and starts its review period over"),
+    ):
+        action(name, about, "ID", "an item id (a prefix will do)").set_defaults(reason="")
+    action("review", "disputed items, items due for review, and deletions you can undo")
+    p = action(
+        "delete",
+        "remove noise for good; neighbours linked through it stay linked",
+        "ID",
+        "one or more item ids (prefixes will do)",
+    )
+    p.add_argument("--reason", default="", help="why, kept with the deletion")
+    p.add_argument("--yes", action="store_true", help="delete without asking")
+    action(
+        "undelete",
+        "put a deletion back as it was",
+        "BATCH",
+        "the deletion's batch id (`gm knowledge review` lists them)",
+    )
+    session = "a session id (a prefix will do)"
+    p = action(
+        "graduate",
+        "graduate a session's waiting exchanges now; the session goes on",
+        "SESSION",
+        session,
+    )
+    p.add_argument("--wait", action="store_true", help="wait until it is done")
+    p = action(
+        "regraduate",
+        "graduate a whole session again from its transcript, under the current rules",
+        "SESSION",
+        session,
+    )
+    p.add_argument(
+        "--preview",
+        action="store_true",
+        help="run it on a copy of memory and show what would change",
+    )
+    p.add_argument("--apply", action="store_true", help="keep the last preview")
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="change memory directly even for a long session (no preview first)",
+    )
+    p.add_argument("--wait", action="store_true", help="wait until it is done")
+    action(
+        "resummarize",
+        "fold a session's summaries into one; knowledge is not touched",
+        "SESSION",
+        session,
+    )
+    p = action(
+        "rescope",
+        "the model proposes where each item should be recalled; nothing changes until --apply",
+    )
+    p.add_argument("--apply", action="store_true", help="keep the last proposal")
+    p.add_argument("--wait", action="store_true", help="wait for the proposal and show it")
+    p = action("scope", "set items' scope by hand", "ID", "one or more item ids")
+    p.add_argument("--to", default="", help="global, topic:<name>, or a project's name")
+    p = action(
+        "summarize",
+        "a brief of what memory knows about one project or topic",
+        "SCOPE",
+        "global, topic:<name>, or a project's name",
+    )
+    p.add_argument("--force", action="store_true", help="write it again even when no note changed")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="gm", description="Graph memory for coding agents")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -624,60 +722,15 @@ def main(argv: list[str] | None = None) -> int:
             "--agent", default="claude-code", help="adapter: built-in name or package.module:Class"
         )
     sub.add_parser("status", help="show daemon, buffer and knowledge status")
-    kp = sub.add_parser("knowledge", help="list what graduated into the knowledge graph")
-    kp.add_argument(
-        "action",
-        nargs="?",
-        choices=[
-            "list",
-            "show",
-            "backfill",
-            "retract",
-            "restore",
-            "confirm",
-            "review",
-            "delete",
-            "undelete",
-            "graduate",
-            "regraduate",
-            "resummarize",
-            "rescope",
-            "scope",
-            "summarize",
-        ],
-        default="list",
-        help="retract: mark an item no longer true; restore: undo that; confirm: it still "
-        "holds; review: disputed and overdue items; delete: remove items for good (noise); "
-        "undelete: put a deletion back; graduate: a session's waiting exchanges now; "
-        "regraduate: a whole session again from its transcript, under the current rules; "
-        "resummarize: fold a session's summaries into one, knowledge untouched; "
-        "rescope: the model proposes where each item is recalled (--apply keeps it); "
-        "scope: set items' scope by hand (--to); "
-        "summarize: a brief of what memory knows about one project or topic",
+    kp = sub.add_parser(
+        "knowledge",
+        help="list what graduated into the knowledge graph, and correct it",
+        description="With no action, lists every item (see `list`). "
+        "`gm knowledge <action> --help` shows an action's options.",
     )
-    kp.add_argument(
-        "id",
-        nargs="*",
-        help="item or entity id (prefix); several for delete; a batch for undelete; "
-        "summarize: global, topic:<name>, or a project's name",
-    )
-    kp.add_argument("--all", action="store_true", help="include items no longer true")
-    kp.add_argument("--reason", default="", help="why (retract, delete)")
-    kp.add_argument("--yes", action="store_true", help="delete without asking")
-    kp.add_argument("--wait", action="store_true", help="graduate: wait until it is done")
-    kp.add_argument(
-        "--preview", action="store_true", help="regraduate on a copy of memory; change nothing"
-    )
-    kp.add_argument(
-        "--apply", action="store_true", help="regraduate, rescope: keep the last preview"
-    )
-    kp.add_argument("--to", default="", help="scope: global, topic:<name>, or a project's name")
-    kp.add_argument(
-        "--force",
-        action="store_true",
-        help="regraduate: change memory directly even for a long session (no preview first); "
-        "summarize: write it again even when no note changed",
-    )
+    kp.add_argument("--all", action="store_true", help="list: include items no longer true")
+    _knowledge_actions(kp.add_subparsers(dest="action", metavar="ACTION", title="actions"))
+    kp.set_defaults(action="list")  # after the actions, so it is their default too
     sp = sub.add_parser("stats", help="health and quality numbers from the event log")
     sp.add_argument("--since", default="7d", help="window: 30m, 24h, 7d, 2w or all")
     sp.add_argument("--json", action="store_true", help="machine-readable output")

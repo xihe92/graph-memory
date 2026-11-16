@@ -99,6 +99,9 @@ exchange that started the task.
 
 ## Commands
 
+`gm <command> --help` shows a command's options, and `gm knowledge <action> --help`
+an action's.
+
 | Command | What it does |
 |---|---|
 | `gm status` | Buffer (sessions and exchanges waiting), knowledge counts, graduation queue |

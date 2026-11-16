@@ -182,6 +182,9 @@ def test_gm_knowledge_commands(
     assert "2 items (1 no longer true)" in out
     code, out, _ = _gm(capsys, "knowledge", "list", "--all")
     assert "lua script  [no longer true]" in out
+    for argv in (("--all",), ("--all", "list")):  # --all before the action works too
+        code, out, _ = _gm(capsys, "knowledge", *argv)
+        assert code == 0 and "lua script  [no longer true]" in out
 
     code, out, _ = _gm(capsys, "knowledge", "show", "aaaa1")
     assert code == 0 and json.loads(out)["item"]["invalid_reason"] == "switched to SETNX"
@@ -387,3 +390,27 @@ def test_a_daemon_that_hangs_up_is_unavailable(short_dir: Path) -> None:
     finally:
         t.join(5)
         srv.close()
+
+
+def test_gm_knowledge_actions_take_only_their_own_options(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Each action has its own options: one that belongs to another action is an error,
+    not silently ignored, and `--help` on an action shows only its own."""
+    for argv in (
+        ("list", "--yes"),
+        ("retract", "aaaa", "--yes"),
+        ("show", "aaaa", "--reason", "x"),
+        ("graduate", "s1", "--preview"),
+        ("rescope", "--to", "global"),
+    ):
+        with pytest.raises(SystemExit) as stop:
+            cli.main(["knowledge", *argv])
+        assert stop.value.code == 2
+        assert "unrecognized arguments" in capsys.readouterr().err
+    with pytest.raises(SystemExit) as stop:
+        cli.main(["knowledge", "regraduate", "--help"])
+    assert stop.value.code == 0
+    out = capsys.readouterr().out
+    assert all(f in out for f in ("--preview", "--apply", "--force", "--wait", "SESSION"))
+    assert "--reason" not in out and "--to" not in out
