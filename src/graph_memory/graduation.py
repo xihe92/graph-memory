@@ -704,131 +704,150 @@ def apply(
     store: KnowledgeStore, plan: MergePlan, merged: dict[str, Any] | None, started: float
 ) -> Segment:
     """Store writes, no model. Returns the segment record."""
-    seg, ex = plan.seg, plan.ex
-    segment = Segment(
-        session=seg.session,
-        exchanges=len(seg.exchanges),
-        start=seg.exchanges[0].when,
-        end=seg.exchanges[-1].when,
-        trigger=seg.trigger,
-    )
-    when = {x.id: x.when for x in seg.exchanges}
+    w = _Writes(store, plan)
+    w.entities(merged)
+    w.topic_spellings()
+    w.reinforce()
+    decisions = _decisions(merged, len(plan.new_items))
+    created, dup_of_new = w.new_items(decisions)
+    w.links(decisions, created, dup_of_new)
+    w.co_occurrence()
+    return w.finish(started)
 
-    # entities: model answers to the open questions, then create what is still new
-    for ans in (merged or {}).get("entities") or []:
-        if not isinstance(ans, dict):
-            continue
-        q = _ref(ans.get("q"), "Q", len(plan.questions))
-        if q is None:
-            continue
-        norm, cands = plan.questions[q]
-        c = _ref(ans.get("same_as"), "C", len(cands))
-        if c is not None and cands[c] in store.entities:
-            plan.entity_ids[norm] = cands[c]
-    for norm, e in ex.entities.items():
-        if norm in plan.entity_ids:
-            store.merge_entity(plan.entity_ids[norm], e["name"], e["summary"])
-        else:
-            ent = store.add_entity(
-                Entity(name=e["name"], kind=e["kind"], summary=e["summary"]), e.get("vector")
-            )
-            plan.entity_ids[norm] = ent.entity_id
 
-    def entity_ids(it: dict[str, Any]) -> list[str]:
-        return list(
-            dict.fromkeys(plan.entity_ids[n] for n in it["entities"] if n in plan.entity_ids)
-        )
-
-    def valid_at(it: dict[str, Any]) -> datetime:
-        times = [when[e] for e in it["evidence"] if e in when]
-        return max(times) if times else segment.end
-
-    def source(it: dict[str, Any]) -> Source:
-        return Source(session=seg.session, until=valid_at(it))
-
-    def again(item_id: str) -> bool:
-        """A rebuild reads a session's turns a second time: what that session already
-        taught is the same evidence, not a new statement of it."""
-        return seg.trigger == "rebuild" and any(
-            s.session == seg.session for s in store.items[item_id].sources
-        )
-
-    spelled = store.topics()  # one spelling per topic: memory's, else the first one here
-    for it in [*plan.new_items, *(x for _, x in plan.reinforce)]:
-        name = topic_of(it["scope"])
-        if name:
-            it["scope"] = spelled.setdefault(name.lower(), it["scope"])
-
-    def provenance(item_id: str, it: dict[str, Any]) -> None:
-        """A restatement from a better source (docs over the assistant's word) upgrades
-        where the item is said to come from."""
-        old = store.items[item_id]
-        if TRUST[it["origin"]] > TRUST[old.origin]:
-            old.origin = it["origin"]
-            old.ref = it["ref"] or old.ref
-        old.applies_to = old.applies_to or it["applies_to"]
-        if old.scope == "global" and topic_of(it["scope"]):
-            old.scope = it["scope"]  # restated as about one subject: recall it only there
-        store.touch(item_id)  # what it says about itself may have changed: save it
-
-    for item_id, it in plan.reinforce:
-        store.reinforce(item_id, segment.segment_id, source(it), boost=not again(item_id))
-        provenance(item_id, it)
-        segment.items.append(item_id)
-
-    # the model's decisions per new item
+def _decisions(merged: dict[str, Any] | None, new_items: int) -> dict[int, dict[str, Any]]:
+    """The model's decisions per new item, by its index."""
     decisions: dict[int, dict[str, Any]] = {}
     for d in (merged or {}).get("items") or []:
         if isinstance(d, dict):
-            n = _ref(d.get("id"), "N", len(plan.new_items))
+            n = _ref(d.get("id"), "N", new_items)
             if n is not None:
                 decisions[n] = d
+    return decisions
 
-    created: dict[int, str] = {}
-    dup_of_new: dict[int, int] = {}
-    for n, it in enumerate(plan.new_items):
-        d = decisions.get(n, {})
-        k = _ref(d.get("duplicate_of"), "K", len(plan.existing))
-        if k is not None and plan.existing[k] in store.items:
-            store.reinforce(
-                plan.existing[k], segment.segment_id, source(it), boost=not again(plan.existing[k])
-            )
-            provenance(plan.existing[k], it)
-            created[n] = plan.existing[k]
-            segment.items.append(plan.existing[k])
-            continue
-        other = _ref(d.get("duplicate_of"), "N", len(plan.new_items))
-        if other is not None and other < n and other in created:
-            dup_of_new[n] = other
-            store.reinforce(created[other], segment.segment_id, source(it))
-            created[n] = created[other]
-            continue
-        item = store.add_item(
-            Item(
-                type=it["type"],
-                statement=it["statement"],
-                why=it["why"],
-                scope=it["scope"],
-                entities=entity_ids(it),
-                segments=[segment.segment_id],
-                sources=[source(it)],
-                valid_at=valid_at(it),
-                origin=it["origin"],
-                ref=it["ref"],
-                applies_to=it["applies_to"],
-                volatility=it["volatility"],
-            ),
-            it.get("vector"),
+
+class _Writes:
+    """One graduation's writes to the store, in the order `apply` makes them."""
+
+    def __init__(self, store: KnowledgeStore, plan: MergePlan) -> None:
+        self.store, self.plan, self.seg = store, plan, plan.seg
+        seg = plan.seg
+        self.segment = Segment(
+            session=seg.session,
+            exchanges=len(seg.exchanges),
+            start=seg.exchanges[0].when,
+            end=seg.exchanges[-1].when,
+            trigger=seg.trigger,
         )
-        created[n] = item.item_id
-        segment.items.append(item.item_id)
+        self.when = {x.id: x.when for x in seg.exchanges}
 
-    for n, d in decisions.items():
-        if n not in created or n in dup_of_new:
-            continue
-        me = created[n]
-        if me in plan.existing:  # was a duplicate of an existing item
-            continue
+    def entities(self, merged: dict[str, Any] | None) -> None:
+        """Model answers to the open questions (is it an entity memory has?), then create
+        what is still new."""
+        store, plan = self.store, self.plan
+        for ans in (merged or {}).get("entities") or []:
+            if not isinstance(ans, dict):
+                continue
+            q = _ref(ans.get("q"), "Q", len(plan.questions))
+            if q is None:
+                continue
+            norm, cands = plan.questions[q]
+            c = _ref(ans.get("same_as"), "C", len(cands))
+            if c is not None and cands[c] in store.entities:
+                plan.entity_ids[norm] = cands[c]
+        for norm, e in plan.ex.entities.items():
+            if norm in plan.entity_ids:
+                store.merge_entity(plan.entity_ids[norm], e["name"], e["summary"])
+            else:
+                ent = store.add_entity(
+                    Entity(name=e["name"], kind=e["kind"], summary=e["summary"]), e.get("vector")
+                )
+                plan.entity_ids[norm] = ent.entity_id
+
+    def topic_spellings(self) -> None:
+        """One spelling per topic: memory's, else the first one here."""
+        spelled = self.store.topics()
+        for it in [*self.plan.new_items, *(x for _, x in self.plan.reinforce)]:
+            name = topic_of(it["scope"])
+            if name:
+                it["scope"] = spelled.setdefault(name.lower(), it["scope"])
+
+    def reinforce(self) -> None:
+        """The items the plan matched to ones memory has."""
+        for item_id, it in self.plan.reinforce:
+            self.store.reinforce(
+                item_id, self.segment.segment_id, self._source(it), boost=not self._again(item_id)
+            )
+            self._provenance(item_id, it)
+            self.segment.items.append(item_id)
+
+    def new_items(
+        self, decisions: dict[int, dict[str, Any]]
+    ) -> tuple[dict[int, str], dict[int, int]]:
+        """Each new item: a duplicate of one memory has, or of one before it here, or
+        added. Returns new item -> its id, and new item -> the earlier one it repeats."""
+        store, plan, segment = self.store, self.plan, self.segment
+        created: dict[int, str] = {}
+        dup_of_new: dict[int, int] = {}
+        for n, it in enumerate(plan.new_items):
+            d = decisions.get(n, {})
+            k = _ref(d.get("duplicate_of"), "K", len(plan.existing))
+            if k is not None and plan.existing[k] in store.items:
+                store.reinforce(
+                    plan.existing[k],
+                    segment.segment_id,
+                    self._source(it),
+                    boost=not self._again(plan.existing[k]),
+                )
+                self._provenance(plan.existing[k], it)
+                created[n] = plan.existing[k]
+                segment.items.append(plan.existing[k])
+                continue
+            other = _ref(d.get("duplicate_of"), "N", len(plan.new_items))
+            if other is not None and other < n and other in created:
+                dup_of_new[n] = other
+                store.reinforce(created[other], segment.segment_id, self._source(it))
+                created[n] = created[other]
+                continue
+            item = store.add_item(
+                Item(
+                    type=it["type"],
+                    statement=it["statement"],
+                    why=it["why"],
+                    scope=it["scope"],
+                    entities=self._entity_ids(it),
+                    segments=[segment.segment_id],
+                    sources=[self._source(it)],
+                    valid_at=self._valid_at(it),
+                    origin=it["origin"],
+                    ref=it["ref"],
+                    applies_to=it["applies_to"],
+                    volatility=it["volatility"],
+                ),
+                it.get("vector"),
+            )
+            created[n] = item.item_id
+            segment.items.append(item.item_id)
+        return created, dup_of_new
+
+    def links(
+        self,
+        decisions: dict[int, dict[str, Any]],
+        created: dict[int, str],
+        dup_of_new: dict[int, int],
+    ) -> None:
+        """What each item added here retires, and what it relates to."""
+        for n, d in decisions.items():
+            if n not in created or n in dup_of_new:
+                continue
+            me = created[n]
+            if me in self.plan.existing:  # was a duplicate of an existing item
+                continue
+            self._invalidates(me, d)
+            self._related(me, d, created)
+
+    def _invalidates(self, me: str, d: dict[str, Any]) -> None:
+        store, plan = self.store, self.plan
         for inv in d.get("invalidates") or []:
             if not isinstance(inv, dict):
                 continue
@@ -837,6 +856,9 @@ def apply(
                 store.invalidate(
                     plan.existing[k], store.items[me], str(inv.get("reason") or "")[:300]
                 )
+
+    def _related(self, me: str, d: dict[str, Any], created: dict[int, str]) -> None:
+        store, plan = self.store, self.plan
         for rel in (d.get("related") or [])[:4]:
             if not isinstance(rel, dict):
                 continue
@@ -855,20 +877,60 @@ def apply(
             if target is not None and target in store.items:
                 store.add_edge(me, target, relation, weight)
 
-    # co-occurrence: learned in the same segment and about a shared, specific entity
-    ids = list(dict.fromkeys(segment.items))
-    for a_i, a in enumerate(ids):
-        for b in ids[a_i + 1 :]:
-            ia, ib = store.items[a], store.items[b]
-            if any(not store.hub(e) for e in set(ia.entities) & set(ib.entities)):
-                store.add_edge(a, b, Relation.CO_OCCURS, CO_OCCUR_WEIGHT, "cooccur")
+    def co_occurrence(self) -> None:
+        """Learned in the same segment and about a shared, specific entity: linked."""
+        store = self.store
+        ids = list(dict.fromkeys(self.segment.items))
+        for a_i, a in enumerate(ids):
+            for b in ids[a_i + 1 :]:
+                ia, ib = store.items[a], store.items[b]
+                if any(not store.hub(e) for e in set(ia.entities) & set(ib.entities)):
+                    store.add_edge(a, b, Relation.CO_OCCURS, CO_OCCUR_WEIGHT, "cooccur")
+        self.segment.items = ids
 
-    segment.items = ids
-    segment.new = [i for i in ids if store.items[i].segments[:1] == [segment.segment_id]]
-    segment.calls = ex.calls
-    segment.ms = round((time.perf_counter() - started) * 1000, 1)
-    store.add_segment(segment)
-    return segment
+    def finish(self, started: float) -> Segment:
+        """The segment record, with what it taught, stored."""
+        store, segment = self.store, self.segment
+        ids = segment.items
+        segment.new = [i for i in ids if store.items[i].segments[:1] == [segment.segment_id]]
+        segment.calls = self.plan.ex.calls
+        segment.ms = round((time.perf_counter() - started) * 1000, 1)
+        store.add_segment(segment)
+        return segment
+
+    # ------------------------------------------------------------------ per item
+
+    def _entity_ids(self, it: dict[str, Any]) -> list[str]:
+        plan = self.plan
+        return list(
+            dict.fromkeys(plan.entity_ids[n] for n in it["entities"] if n in plan.entity_ids)
+        )
+
+    def _valid_at(self, it: dict[str, Any]) -> datetime:
+        times = [self.when[e] for e in it["evidence"] if e in self.when]
+        return max(times) if times else self.segment.end
+
+    def _source(self, it: dict[str, Any]) -> Source:
+        return Source(session=self.seg.session, until=self._valid_at(it))
+
+    def _again(self, item_id: str) -> bool:
+        """A rebuild reads a session's turns a second time: what that session already
+        taught is the same evidence, not a new statement of it."""
+        return self.seg.trigger == "rebuild" and any(
+            s.session == self.seg.session for s in self.store.items[item_id].sources
+        )
+
+    def _provenance(self, item_id: str, it: dict[str, Any]) -> None:
+        """A restatement from a better source (docs over the assistant's word) upgrades
+        where the item is said to come from."""
+        old = self.store.items[item_id]
+        if TRUST[it["origin"]] > TRUST[old.origin]:
+            old.origin = it["origin"]
+            old.ref = it["ref"] or old.ref
+        old.applies_to = old.applies_to or it["applies_to"]
+        if old.scope == "global" and topic_of(it["scope"]):
+            old.scope = it["scope"]  # restated as about one subject: recall it only there
+        self.store.touch(item_id)  # what it says about itself may have changed: save it
 
 
 def graduate(

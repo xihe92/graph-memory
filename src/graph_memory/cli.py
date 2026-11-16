@@ -18,7 +18,7 @@ from typing import Any
 
 from . import clock
 from .adapters import load_adapter
-from .client import DaemonUnavailable, RemoteError, call
+from .client import DaemonUnavailable, RemoteError, call, knowledge_items
 from .config import Config, load_config
 from .events import EventLog, events_path, read_events
 from .models import DISABLE_ENV
@@ -229,7 +229,7 @@ def _export(cfg: Config, args: argparse.Namespace) -> int:
     """Memory written out in the JSON format, into a folder: readable in any editor, and
     what a version from before SQLite reads."""
     from .knowledge import KnowledgeStore
-    from .storage import export_json
+    from .migrate import export_json
 
     dest = (
         Path(args.dest).expanduser()
@@ -251,60 +251,57 @@ def _export(cfg: Config, args: argparse.Namespace) -> int:
     return 0
 
 
-def knowledge_items(cfg: Config, *, passive: bool = False) -> dict[str, dict[str, Any]]:
-    """Item id -> {type, statement, valid}, from the running daemon; {} without one."""
-    try:
-        view = call(cfg, "knowledge", {"lean": True}, autostart=False, passive=passive)
-    except (DaemonUnavailable, RemoteError):
-        return {}
-    return {
-        str(i["id"]): {"type": i["type"], "statement": i["statement"], "valid": i["valid"]}
-        for i in view.get("items", [])
-    }
-
-
 def _knowledge(cfg: Config, args: argparse.Namespace) -> int:
-    if args.action == "backfill":
-        res = call(cfg, "graduate", {"all": True})
-        print(f"queued {res['queued']} sessions; watch with `gm status` or `gm knowledge`")
+    """`gm knowledge [action]`: with no action, or `list`, every item by type."""
+    actions = {
+        "backfill": _backfill,
+        "review": lambda cfg, args: _review(cfg),
+        "graduate": _graduate_session,
+        "regraduate": _graduate_session,
+        "resummarize": _resummarize,
+        "rescope": _rescope,
+        "scope": _scope,
+        "summarize": _summarize,
+        **dict.fromkeys(("show", "retract", "restore", "confirm", "delete", "undelete"), _by_id),
+    }
+    return actions.get(args.action, _list_knowledge)(cfg, args)
+
+
+def _backfill(cfg: Config, args: argparse.Namespace) -> int:
+    res = call(cfg, "graduate", {"all": True})
+    print(f"queued {res['queued']} sessions; watch with `gm status` or `gm knowledge`")
+    return 0
+
+
+def _by_id(cfg: Config, args: argparse.Namespace) -> int:
+    """The actions on one item (or one deletion, for `undelete`)."""
+    if not args.id:
+        what = "a batch id" if args.action == "undelete" else "an id"
+        print(f"knowledge {args.action} needs {what}", file=sys.stderr)
+        return 2
+    if args.action == "show":
+        print(json.dumps(call(cfg, "knowledge_item", {"id": args.id[0]}), indent=2))
         return 0
-    if args.action == "review":
-        return _review(cfg)
-    if args.action in ("graduate", "regraduate"):
-        return _graduate_session(cfg, args)
-    if args.action == "resummarize":
-        return _resummarize(cfg, args)
-    if args.action == "rescope":
-        return _rescope(cfg, args)
-    if args.action == "scope":
-        return _scope(cfg, args)
-    if args.action == "summarize":
-        return _summarize(cfg, args)
-    if args.action in ("show", "retract", "restore", "confirm", "delete", "undelete"):
-        if not args.id:
-            what = "a batch id" if args.action == "undelete" else "an id"
-            print(f"knowledge {args.action} needs {what}", file=sys.stderr)
-            return 2
-        if args.action == "show":
-            print(json.dumps(call(cfg, "knowledge_item", {"id": args.id[0]}), indent=2))
+    try:
+        if args.action == "delete":
+            return _delete(cfg, args)
+        if args.action == "undelete":
+            res = call(cfg, "knowledge_undelete", {"batch": args.id[0]})
+            print(f"put back {res['restored']} items (deletion {res['batch']})")
             return 0
-        try:
-            if args.action == "delete":
-                return _delete(cfg, args)
-            if args.action == "undelete":
-                res = call(cfg, "knowledge_undelete", {"batch": args.id[0]})
-                print(f"put back {res['restored']} items (deletion {res['batch']})")
-                return 0
-            res = call(cfg, f"knowledge_{args.action}", {"id": args.id[0], "reason": args.reason})
-        except RemoteError as exc:
-            print(exc, file=sys.stderr)
-            return 1
-        if args.action == "confirm":
-            print(f"{res['id'][:12]} confirmed, its review starts over: {res['statement']}")
-            return 0
-        state = "true again" if res["valid"] else "no longer true"
-        print(f"{res['id'][:12]} is now {state}: {res['statement']}")
+        res = call(cfg, f"knowledge_{args.action}", {"id": args.id[0], "reason": args.reason})
+    except RemoteError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    if args.action == "confirm":
+        print(f"{res['id'][:12]} confirmed, its review starts over: {res['statement']}")
         return 0
+    state = "true again" if res["valid"] else "no longer true"
+    print(f"{res['id'][:12]} is now {state}: {res['statement']}")
+    return 0
+
+
+def _list_knowledge(cfg: Config, args: argparse.Namespace) -> int:
     view = call(cfg, "knowledge")
     ents = {e["id"]: e["name"] for e in view["entities"]}
     items = [i for i in view["items"] if args.all or i["valid"]]

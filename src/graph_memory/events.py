@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any
 
 from . import clock
+from .files import atomic_write
 
 log = logging.getLogger(__name__)
 
@@ -127,8 +128,6 @@ def prune_events(path: Path, before: datetime) -> int:
     """Drop events older than `before`. The live file is moved aside first, so lines that
     hook processes append meanwhile go to a fresh file and are kept. Returns how many
     were dropped."""
-    from .vectors import atomic_write
-
     old = path.with_name(path.name + ".1")
     aside = path.with_name(path.name + ".pruning")
     if not _has_older(old if old.exists() else path, before.isoformat()):

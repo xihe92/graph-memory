@@ -6,15 +6,14 @@ Only knowledge items and entities have vectors; one JSON file holds them all.
 from __future__ import annotations
 
 import base64
-import contextlib
 import json
-import os
-import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
+
+from .files import atomic_write
 
 Embedder = Callable[[str], Sequence[float]]
 Metadata = Mapping[str, str]
@@ -365,18 +364,3 @@ class SqliteVectorIndex:
 
     def save(self) -> None:
         pass  # the backend commits
-
-
-def atomic_write(path: Path, data: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
-            fh.write(data)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(tmp)
-        raise

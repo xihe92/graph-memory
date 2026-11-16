@@ -24,6 +24,7 @@ import os
 import secrets
 import threading
 import webbrowser
+from collections.abc import Callable
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
@@ -31,7 +32,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from .client import DaemonUnavailable, RemoteError, call
+from .client import DaemonUnavailable, RemoteError, call, knowledge_items
 from .config import Config
 from .events import events_path, parse_since, read_events
 from .stats import compute_stats, memory_help
@@ -46,6 +47,34 @@ _STATIC = {
     "/vendor/force-graph.min.js": ("vendor/force-graph.min.js", "text/javascript"),
     "/layout.js": ("layout.js", "text/javascript"),
     "/vendor/d3-force-3d.bundle.js": ("vendor/d3-force-3d.bundle.js", "text/javascript"),
+}
+
+
+def _since(q: dict[str, str]) -> dict[str, Any]:
+    """The Sessions page sends the buffer version it has: unchanged, the daemon says so."""
+    return {"since": int(q["since"])} if q.get("since", "").isdigit() else {}
+
+
+# GET /api/<route> -> (daemon method, its params from the query, passive when polled)
+_GET: dict[str, tuple[str, Callable[[dict[str, str]], dict[str, Any] | None], bool]] = {
+    "sessions": ("sessions", _since, True),
+    "knowledge": ("knowledge", lambda q: {"lean": True}, False),
+    "ksearch": ("knowledge_search", lambda q: {"q": q.get("q", "")}, False),
+    "kitem": ("knowledge_item", lambda q: {"id": q.get("id", "")}, False),
+    "kreview": ("knowledge_review", lambda q: None, False),
+    "ksummary": ("knowledge_summary", lambda q: {"scope": q.get("scope", "")}, True),
+}
+
+# POST /api/<route> -> (daemon method, the body fields it takes)
+_POST: dict[str, tuple[str, tuple[str, ...]]] = {
+    "forget": ("forget", ("session", "id")),
+    "kretract": ("knowledge_retract", ("id", "reason")),
+    "krestore": ("knowledge_restore", ("id",)),
+    "graduate": ("graduate_now", ("session",)),
+    "kconfirm": ("knowledge_confirm", ("id",)),
+    "kdelete": ("knowledge_delete", ("ids", "reason")),
+    "kundelete": ("knowledge_undelete", ("batch",)),
+    "ksummarize": ("knowledge_summarize", ("scope", "force")),
 }
 
 
@@ -168,42 +197,32 @@ class _Handler(BaseHTTPRequestHandler):
         q = {k: v[-1] for k, v in parse_qs(url.query).items()}
         route = url.path[len("/api/") :]
         poll = q.get("poll") == "1"
-        if route == "sessions":
-            params: dict[str, Any] = {}
-            if q.get("since", "").isdigit():
-                params["since"] = int(q["since"])
-            self._daemon("sessions", params, passive=poll)
-        elif route == "knowledge":
-            self._daemon("knowledge", {"lean": True})
-        elif route == "ksearch":
-            self._daemon("knowledge_search", {"q": q.get("q", "")})
-        elif route == "kitem":
-            self._daemon("knowledge_item", {"id": q.get("id", "")})
-        elif route == "kreview":
-            self._daemon("knowledge_review")
-        elif route == "ksummary":
-            self._daemon("knowledge_summary", {"scope": q.get("scope", "")}, passive=poll)
+        if route in _GET:
+            method, params, passive = _GET[route]
+            self._daemon(method, params(q), passive=passive and poll)
         elif route == "stats":
-            try:
-                since = parse_since(q.get("since", "7d"))
-            except ValueError as exc:
-                self._json(400, {"error": str(exc)})
-                return
-            st = compute_stats(read_events(events_path(self.server.cfg.home), since=since))
-            try:
-                st["status"] = call(self.server.cfg, "status", autostart=False, passive=poll)
-            except DaemonUnavailable:
-                st["status"] = None
-            self._json(200, st)
+            self._stats(q.get("since", "7d"), poll)
         elif route == "help":
             self._help(q.get("since", "7d"), poll)
         else:
             self._json(404, {"error": "unknown endpoint"})
 
+    def _stats(self, since_text: str, poll: bool = False) -> None:
+        """Counts from the event log, and the daemon's status if it runs."""
+        try:
+            since = parse_since(since_text)
+        except ValueError as exc:
+            self._json(400, {"error": str(exc)})
+            return
+        st = compute_stats(read_events(events_path(self.server.cfg.home), since=since))
+        try:
+            st["status"] = call(self.server.cfg, "status", autostart=False, passive=poll)
+        except DaemonUnavailable:
+            st["status"] = None
+        self._json(200, st)
+
     def _help(self, since_text: str, poll: bool = False) -> None:
         """How often memory gave Claude notes, and which notes the replies used."""
-        from .cli import knowledge_items
-
         try:
             since = parse_since(since_text)
         except ValueError as exc:
@@ -226,26 +245,11 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(400, {"error": "bad json"})
             return
         route = urlparse(self.path).path[len("/api/") :]
-        if route == "forget":
-            self._daemon("forget", {"session": body.get("session"), "id": body.get("id")})
-        elif route == "kretract":
-            self._daemon("knowledge_retract", {"id": body.get("id"), "reason": body.get("reason")})
-        elif route == "krestore":
-            self._daemon("knowledge_restore", {"id": body.get("id")})
-        elif route == "graduate":
-            self._daemon("graduate_now", {"session": body.get("session")})
-        elif route == "kconfirm":
-            self._daemon("knowledge_confirm", {"id": body.get("id")})
-        elif route == "kdelete":
-            self._daemon("knowledge_delete", {"ids": body.get("ids"), "reason": body.get("reason")})
-        elif route == "kundelete":
-            self._daemon("knowledge_undelete", {"batch": body.get("batch")})
-        elif route == "ksummarize":
-            self._daemon(
-                "knowledge_summarize", {"scope": body.get("scope"), "force": body.get("force")}
-            )
-        else:
+        if route not in _POST:
             self._json(404, {"error": "unknown endpoint"})
+            return
+        method, keys = _POST[route]
+        self._daemon(method, {k: body.get(k) for k in keys})
 
 
 def serve_ui(

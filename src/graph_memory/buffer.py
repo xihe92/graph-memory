@@ -32,7 +32,7 @@ from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
 from . import clock
 from .anchors import CodeAnchor, SourceRef
-from .vectors import atomic_write
+from .files import atomic_write
 
 log = logging.getLogger(__name__)
 

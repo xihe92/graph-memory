@@ -17,6 +17,7 @@ exchanges not yet graduated.
 Then, for a memory still in the JSON files: memory.db is built beside them, checked to
 hold the same memory (every row and vector, and the nearest notes for 50 of them), the
 JSON files are packed into archive-<date>-json.tar.gz, and only then memory.db takes over.
+`gm export` goes the other way: a copy of the memory in the JSON files (export_json).
 
 Run it with the daemon stopped. `--dry-run` shows the plan and changes nothing.
 """
@@ -41,7 +42,6 @@ from .storage import (
     JSON_FILES,
     JsonBackend,
     SqliteBackend,
-    copy_memory,
     differences,
     sqlite_problem,
 )
@@ -323,3 +323,44 @@ def sqlite_apply(p: SqlitePlan) -> dict[str, Any]:
         "archive_bytes": p.archive.stat().st_size,
         "removed": files,
     }
+
+
+def copy_memory(src: KnowledgeStore, dst: KnowledgeStore) -> dict[str, int]:
+    """Copy all of `src` into the empty store `dst` and save it in full: items, entities,
+    edges, graduations, vectors exactly as stored, deletions and summaries. A vector
+    whose id is neither an item nor an entity (left by an old bug) is not carried over."""
+    for kind, live in src.collections().items():
+        dst.collections()[kind].update(live)
+    vectors = 0
+    for kind, ids in (("item", src.items), ("entity", src.entities)):
+        for i in ids:
+            v = src.vectors.get(i)
+            if v is not None:
+                dst.vectors.upsert(i, v, src.vector_meta(kind, i), unit=True)
+                vectors += 1
+    for batch in src.deleted():
+        dst.backend.log_deletion(batch)
+    summaries = src.summaries()
+    if summaries:
+        dst.backend.set_summaries(summaries)
+    dst.save(full=True)
+    return {
+        "items": len(src.items),
+        "entities": len(src.entities),
+        "edges": len(src.edges),
+        "segments": len(src.segments),
+        "vectors": vectors,
+        "deletions": len(src.deleted()),
+        "summaries": len(summaries),
+    }
+
+
+def export_json(store: KnowledgeStore, dest: Path) -> dict[str, int]:
+    """Write a memory out in the JSON format (`gm export`): the files a version from
+    before SQLite reads, and readable in any editor."""
+    dest.mkdir(parents=True, exist_ok=True)
+    for name in JSON_FILES:
+        (dest / name).unlink(missing_ok=True)
+    out = KnowledgeStore(dest, backend=JsonBackend(dest))
+    counts = copy_memory(store, out)
+    return counts

@@ -19,7 +19,8 @@ import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
-from .vectors import JsonVectorIndex, SqliteVectorIndex, VectorIndex, atomic_write
+from .files import atomic_write
+from .vectors import JsonVectorIndex, SqliteVectorIndex, VectorIndex
 
 if TYPE_CHECKING:
     from .knowledge import KnowledgeStore
@@ -385,46 +386,3 @@ def differences(a: KnowledgeStore, b: KnowledgeStore, queries: int = 50) -> list
             out.append(f"the nearest notes to {i} differ")
             break
     return out
-
-
-def copy_memory(src: KnowledgeStore, dst: KnowledgeStore) -> dict[str, int]:
-    """Copy all of `src` into the empty store `dst` and save it in full: items, entities,
-    edges, graduations, vectors exactly as stored, deletions and summaries. A vector
-    whose id is neither an item nor an entity (left by an old bug) is not carried over."""
-    for kind, live in src.collections().items():
-        dst.collections()[kind].update(live)
-    vectors = 0
-    for kind, ids in (("item", src.items), ("entity", src.entities)):
-        for i in ids:
-            v = src.vectors.get(i)
-            if v is not None:
-                dst.vectors.upsert(i, v, src.vector_meta(kind, i), unit=True)
-                vectors += 1
-    for batch in src.deleted():
-        dst.backend.log_deletion(batch)
-    summaries = src.summaries()
-    if summaries:
-        dst.backend.set_summaries(summaries)
-    dst.save(full=True)
-    return {
-        "items": len(src.items),
-        "entities": len(src.entities),
-        "edges": len(src.edges),
-        "segments": len(src.segments),
-        "vectors": vectors,
-        "deletions": len(src.deleted()),
-        "summaries": len(summaries),
-    }
-
-
-def export_json(store: KnowledgeStore, dest: Path) -> dict[str, int]:
-    """Write a memory out in the JSON format (`gm export`): the files a version from
-    before SQLite reads, and readable in any editor."""
-    dest.mkdir(parents=True, exist_ok=True)
-    for name in JSON_FILES:
-        (dest / name).unlink(missing_ok=True)
-    from .knowledge import KnowledgeStore
-
-    out = KnowledgeStore(dest, backend=JsonBackend(dest))
-    counts = copy_memory(store, out)
-    return counts

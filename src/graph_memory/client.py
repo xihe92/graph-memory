@@ -87,3 +87,15 @@ def call(
     raise DaemonUnavailable(
         f"daemon did not start within {cfg.start_timeout:.0f}s; see {cfg.log_path}"
     )
+
+
+def knowledge_items(cfg: Config, *, passive: bool = False) -> dict[str, dict[str, Any]]:
+    """Item id -> {type, statement, valid}, from the running daemon; {} without one."""
+    try:
+        view = call(cfg, "knowledge", {"lean": True}, autostart=False, passive=passive)
+    except (DaemonUnavailable, RemoteError):
+        return {}
+    return {
+        str(i["id"]): {"type": i["type"], "statement": i["statement"], "valid": i["valid"]}
+        for i in view.get("items", [])
+    }

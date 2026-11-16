@@ -319,12 +319,13 @@ def test_a_long_session_is_previewed_first_unless_forced(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Replaying a long session can bring back many stale items: it is previewed first."""
-    from graph_memory import daemon, graduation
+    from graph_memory import graduation
+    from graph_memory.daemon import rebuild
 
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
     monkeypatch.setenv("GM_HOME", str(cfg.home))
     monkeypatch.setattr(graduation, "CHUNK_CHARS", 100)  # one turn per part
-    monkeypatch.setattr(daemon, "REBUILD_DIRECT_PARTS", 1)
+    monkeypatch.setattr(rebuild, "REBUILD_DIRECT_PARTS", 1)
     _transcript(tmp_path)
     session = f"claude-code:{SID}"
     run = [
