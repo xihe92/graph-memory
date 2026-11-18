@@ -7,6 +7,12 @@ each session while you work, has a small model distil it into single notes (deci
 facts, preferences, pitfalls, procedures, open items, things you learned by asking), and
 shows Claude the few notes that apply before each reply.
 
+![Session 1 states a project convention; the session graduates into notes; a fresh session follows the convention unprompted](docs/img/demo.gif)
+
+*A real Claude Code recording. One session states a convention, the session graduates
+into notes, and a new session follows it without being told again. Claude Code's own
+auto memory was turned off for the recording.*
+
 ![The Knowledge page: a 3D graph of notes, the list of notes, and one note's detail](docs/img/knowledge.png)
 
 *The Knowledge page: notes coloured by type and the links between them, with one note
