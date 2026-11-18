@@ -88,7 +88,13 @@ agent hook ──▶ gm (exits in ms) ──Unix socket──▶ daemon ──�
 Claude Code is the first integration ([`integrations/claude-code/`](integrations/claude-code/)).
 It installs in one of two ways, on macOS or Linux. Use one, not both.
 
-**As a Claude Code plugin.** Inside Claude Code:
+**As a Claude Code plugin.** In a terminal (Claude Code 2.1.275 or later):
+
+```sh
+claude plugin install graph-memory --marketplace xihe92/graph-memory
+```
+
+Or inside Claude Code, which also works on older versions:
 
 ```
 /plugin marketplace add xihe92/graph-memory

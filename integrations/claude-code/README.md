@@ -1,6 +1,12 @@
 # graph-memory for Claude Code
 
-The Claude Code plugin. Install it inside Claude Code:
+The Claude Code plugin. Install it from a terminal (Claude Code 2.1.275 or later):
+
+```sh
+claude plugin install graph-memory --marketplace xihe92/graph-memory
+```
+
+Or inside Claude Code:
 
 ```
 /plugin marketplace add xihe92/graph-memory
