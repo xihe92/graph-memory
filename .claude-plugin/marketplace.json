@@ -1,0 +1,15 @@
+{
+  "name": "graph-memory",
+  "description": "graph-memory: long-term memory for Claude Code, on your own machine.",
+  "owner": {
+    "name": "xihe92",
+    "url": "https://github.com/xihe92"
+  },
+  "plugins": [
+    {
+      "name": "graph-memory",
+      "source": "./",
+      "description": "Long-term memory for Claude Code, kept as a knowledge graph on your own machine."
+    }
+  ]
+}

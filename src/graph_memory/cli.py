@@ -23,6 +23,8 @@ from .config import Config, load_config
 from .events import EventLog, events_path, read_events
 from .models import DISABLE_ENV
 
+HOOK_SOURCE_ENV = "GM_HOOK_SOURCE"  # "plugin" when the Claude Code plugin runs the hook
+
 log = logging.getLogger("graph_memory.cli")
 
 
@@ -52,6 +54,11 @@ def _read_payload() -> dict[str, Any]:
 def _hook(cfg: Config, args: argparse.Namespace) -> int:
     if os.environ.get(DISABLE_ENV):
         return 0
+    if os.environ.get(HOOK_SOURCE_ENV) == "plugin":
+        from .claude_setup import has_ours
+
+        if has_ours():  # `gm setup` hooks run too: they do the work, once
+            return 0
     started = time.perf_counter()
     error: str | None = None
     try:

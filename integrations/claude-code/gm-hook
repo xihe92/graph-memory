@@ -1,0 +1,102 @@
+#!/bin/sh
+# graph-memory's Claude Code plugin hook: hands the hook to `gm`, installing or updating
+# gm first when it is missing or older than this plugin.
+#
+#   gm-hook start|recall|remember|graduate     (Claude Code's hook payload on stdin)
+#
+# gm is installed with uv into uv's tool folder, from this plugin's own copy of the repo,
+# in the background: the hook never waits for it. A message for the user goes out only
+# at session start, as Claude Code's systemMessage. Every path exits 0, so a hook never
+# gets in Claude Code's way. It never installs uv itself; without uv it says how.
+#
+# Its own files are in $CLAUDE_PLUGIN_DATA: installed-version (what it installed),
+# install.lock (while an install runs), install.log, install.failed.
+
+cmd="$1"
+root="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
+data="${CLAUDE_PLUGIN_DATA:-$HOME/.graph-memory/plugin}"
+mkdir -p "$data" 2>/dev/null
+stamp="$data/installed-version"
+lock="$data/install.lock"
+log="$data/install.log"
+failed="$data/install.failed"
+want=$(sed -n 's/^ *"version": *"\([^"]*\)".*/\1/p' "$root/.claude-plugin/plugin.json" | head -n 1)
+
+say() { # a line for the user, at session start only
+    [ "$cmd" = start ] && printf '{"systemMessage": "%s"}\n' "$1"
+    return 0
+}
+
+find_uv() {
+    command -v uv 2>/dev/null && return 0
+    for u in "$HOME/.local/bin/uv" "$HOME/.cargo/bin/uv"; do
+        [ -x "$u" ] && { echo "$u"; return 0; }
+    done
+    return 1
+}
+
+find_gm() { # where uv puts tool programs: the first of these that is set, as uv decides
+    if [ -n "$UV_TOOL_BIN_DIR" ]; then d="$UV_TOOL_BIN_DIR"
+    elif [ -n "$XDG_BIN_HOME" ]; then d="$XDG_BIN_HOME"
+    elif [ -n "$XDG_DATA_HOME" ]; then d="$XDG_DATA_HOME/../bin"
+    else d="$HOME/.local/bin"
+    fi
+    [ -x "$d/gm" ] && { echo "$d/gm"; return 0; }
+    return 1
+}
+
+installing() { # a lock without a live process is left over from a crash
+    [ -d "$lock" ] || return 1
+    pid=$(cat "$lock/pid" 2>/dev/null) || return 0 # just taken; the pid follows
+    kill -0 "$pid" 2>/dev/null && return 0
+    rm -rf "$lock"
+    return 1
+}
+
+install() { # $1 = install | update; runs detached, the hook does not wait
+    installing && return 0
+    mkdir "$lock" 2>/dev/null || return 0
+    GM_PLUGIN_UV="$uv" GM_PLUGIN_ROOT="$root" GM_PLUGIN_WANT="$want" GM_PLUGIN_LOCK="$lock" \
+        GM_PLUGIN_STAMP="$stamp" GM_PLUGIN_FAILED="$failed" GM_PLUGIN_STEP="$1" GM_PLUGIN_GM="$gm" \
+        nohup sh -c '
+            trap "rm -rf \"$GM_PLUGIN_LOCK\"" EXIT
+            if "$GM_PLUGIN_UV" tool install --managed-python --python 3.12 --reinstall "$GM_PLUGIN_ROOT"; then
+                printf "%s\n" "$GM_PLUGIN_WANT" >"$GM_PLUGIN_STAMP"
+                rm -f "$GM_PLUGIN_FAILED"
+                # the daemon still runs the old code: stop it, the next hook starts the new one
+                [ "$GM_PLUGIN_STEP" = update ] && [ -n "$GM_PLUGIN_GM" ] && "$GM_PLUGIN_GM" stop
+            else
+                touch "$GM_PLUGIN_FAILED"
+            fi
+        ' </dev/null >"$log" 2>&1 &
+    echo $! >"$lock/pid" 2>/dev/null
+}
+
+uv=$(find_uv)
+gm=$(find_gm)
+
+if [ -n "$gm" ]; then
+    # installed by this plugin but for an older version: update in the background
+    if [ "$cmd" = start ] && [ -f "$stamp" ] && [ "$(cat "$stamp")" != "$want" ] && [ -n "$uv" ]; then
+        install update
+    fi
+    GM_HOOK_SOURCE=plugin exec "$gm" "$cmd"
+fi
+
+if [ -z "$uv" ]; then
+    say "graph-memory needs uv to install. Run: curl -LsSf https://astral.sh/uv/install.sh | sh  -- then start a new session."
+    exit 0
+fi
+if installing; then
+    say "graph-memory is still installing; memory starts with your next session."
+    exit 0
+fi
+if [ "$cmd" = start ]; then
+    if [ -f "$failed" ]; then
+        say "graph-memory could not install last time (see $log); trying again in the background."
+    else
+        say "graph-memory is installing in the background (about a minute); memory starts with your next session."
+    fi
+    install install
+fi
+exit 0

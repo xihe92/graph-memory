@@ -85,17 +85,33 @@ agent hook ──▶ gm (exits in ms) ──Unix socket──▶ daemon ──�
 
 ## Install
 
-On macOS or Linux, with Claude Code installed:
+Claude Code is the first integration ([`integrations/claude-code/`](integrations/claude-code/)).
+It installs in one of two ways, on macOS or Linux. Use one, not both.
+
+**As a Claude Code plugin.** Inside Claude Code:
+
+```
+/plugin marketplace add xihe92/graph-memory
+/plugin install graph-memory@graph-memory
+```
+
+The plugin brings the hooks. In the first session after that, it installs graph-memory
+in the background with [uv](https://docs.astral.sh/uv/) (about a minute; Claude Code
+shows a line saying so), and memory starts with the next session. A plugin update
+reinstalls it the same way. The plugin needs uv and does not install uv itself: without
+it, it says how.
+
+**With the one-line installer:**
 
 ```sh
 curl -LsSf https://raw.githubusercontent.com/xihe92/graph-memory/main/install.sh | sh
 ```
 
-The script installs [uv](https://docs.astral.sh/uv/) if it is missing, installs
-graph-memory with it, and runs `gm setup`, which adds the hooks below to
-`~/.claude/settings.json`. Your other hooks and settings stay as they are, and the file
-is backed up first. New Claude Code sessions then use memory. Running the line again
-updates graph-memory.
+The script installs uv if it is missing, installs graph-memory with it, and runs
+`gm setup`, which adds the hooks below to `~/.claude/settings.json`. Your other hooks and
+settings stay as they are, and the file is backed up first. New Claude Code sessions then
+use memory. Running the line again updates graph-memory. If the plugin is installed as
+well, its hooks step aside for these, so nothing runs twice.
 
 Or the same by hand, from a clone:
 
@@ -123,15 +139,19 @@ alias for `git merge`, and GraphicsMagick installs a program called `gm`. The ho
 not affected: `gm setup` writes graph-memory's full path into them. In a terminal, call
 it by that path (`~/.local/bin/gm` by default) or as `\gm` to skip the alias.
 
-**To uninstall:** `gm setup --remove` takes the hooks out, `gm stop` stops the daemon,
+**To uninstall:** `/plugin uninstall graph-memory@graph-memory` (the plugin) or
+`gm setup --remove` (the one-liner) takes the hooks out. Then `gm stop` stops the daemon
 and `uv tool uninstall graph-memory` removes the program. Memory stays in
 `~/.graph-memory/` until you delete it.
 
 ## Claude Code hooks
 
-`gm setup` adds these to `~/.claude/settings.json` (`--settings .claude/settings.json`
-for one project instead, `--dry-run` to see what would change). By hand, with `gm`'s
-full path in place of `gm`:
+The plugin brings these hooks itself
+([`integrations/claude-code/hooks.json`](integrations/claude-code/hooks.json)), each
+through a small script that installs or updates `gm` first when needed. `gm setup` adds
+the same hooks to `~/.claude/settings.json` (`--settings .claude/settings.json` for one
+project instead, `--dry-run` to see what would change). By hand, with `gm`'s full path in
+place of `gm`:
 
 ```json
 {
@@ -523,6 +543,9 @@ python -m graph_memory.sim --model haiku --embedder real --json out.json   # rea
 ```
 
 ## Supporting another agent product
+
+Each agent's packaging lives in its own folder under [`integrations/`](integrations/);
+Claude Code's is the first. Another agent needs:
 
 - **`AgentAdapter`** (`graph_memory/adapters/base.py`): parse the product's hook payloads
   (a prompt, a finished reply, the session ending or compacting) and read a finished turn

@@ -1,0 +1,11 @@
+{
+  "name": "graph-memory",
+  "version": "0.2.0",
+  "description": "Long-term memory for Claude Code, kept as a knowledge graph on your own machine: sessions graduate into notes, and the notes that fit each prompt are recalled before the reply.",
+  "author": { "name": "xihe92", "url": "https://github.com/xihe92" },
+  "homepage": "https://github.com/xihe92/graph-memory",
+  "repository": "https://github.com/xihe92/graph-memory",
+  "license": "MIT",
+  "keywords": ["memory", "knowledge-graph", "hooks", "recall"],
+  "hooks": "./integrations/claude-code/hooks.json"
+}

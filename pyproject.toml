@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "graph-memory"
-version = "0.1.0"
+version = "0.2.0"
 description = "Memory for Claude Code: session turns distilled into a knowledge graph and recalled before each reply"
 readme = "README.md"
 license = "MIT"

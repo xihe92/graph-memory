@@ -57,6 +57,39 @@ def is_ours(command: str) -> bool:
     return len(parts) >= 2 and Path(parts[0]).name == "gm" and parts[1] in OURS
 
 
+PLUGIN_ID = "graph-memory@graph-memory"  # the Claude Code plugin (integrations/claude-code)
+
+
+def _load(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def has_ours(path: Path | None = None) -> bool:
+    """Whether Claude Code's settings already run graph-memory's hooks (`gm setup`)."""
+    settings = _load(path or settings_path())
+    hooks = settings.get("hooks") if isinstance(settings, dict) else None
+    if not isinstance(hooks, dict):
+        return False
+    return any(
+        isinstance(h, dict) and is_ours(str(h.get("command", "")))
+        for groups in hooks.values()
+        if isinstance(groups, list)
+        for group in groups
+        if isinstance(group, dict) and isinstance(group.get("hooks"), list)
+        for h in group["hooks"]
+    )
+
+
+def plugin_installed(path: Path | None = None) -> bool:
+    """Whether graph-memory's Claude Code plugin is installed (it brings its own hooks)."""
+    found = _load(path or settings_path().parent / "plugins" / "installed_plugins.json")
+    plugins = found.get("plugins") if isinstance(found, dict) else None
+    return isinstance(plugins, dict) and bool(plugins.get(PLUGIN_ID))
+
+
 def without_ours(settings: dict[str, Any]) -> dict[str, Any]:
     """The settings with graph-memory's hooks taken out; groups and events left empty by
     that go too, everything else stays."""
@@ -133,6 +166,12 @@ def setup(
     wanted = without_ours(current) if remove else with_ours(current, gm or gm_path())
     result = Result(path, changed=wanted != current)
     if not remove:
+        if plugin_installed(path.parent / "plugins" / "installed_plugins.json"):
+            result.notes.append(
+                "graph-memory's Claude Code plugin is installed too and brings the same hooks; "
+                "while these are in settings.json the plugin's stand aside. Use one: "
+                "`gm setup --remove`, or `/plugin uninstall graph-memory@graph-memory`"
+            )
         if shutil.which("claude") is None:
             result.notes.append(
                 "Claude Code's `claude` command is not on PATH: graduation calls it to "
