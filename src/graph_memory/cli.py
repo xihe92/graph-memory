@@ -78,19 +78,18 @@ def _hook(cfg: Config, args: argparse.Namespace) -> int:
             )
             adapter.emit_context(render_context(res))
         elif args.cmd == "graduate":
-            # SessionEnd, or SessionStart after a compaction: graduate what the session
-            # has added since its last graduation, with the agent's own summary if any
-            sid = payload.get("session_id")
-            if not sid:
+            # the session ended or compacted: graduate what it has added since its last
+            # graduation, with the agent's own summary if any
+            end = adapter.parse_end_event(payload)
+            if end is None:
                 return 0
-            compacted = payload.get("source") == "compact" or "trigger" in payload
-            summary = adapter.compact_summary(payload.get("transcript_path")) if compacted else ""
+            summary = adapter.compact_summary(end.transcript_path) if end.compacted else ""
             call(
                 cfg,
                 "graduate",
                 {
-                    "session": adapter.session_key(str(sid)),
-                    "trigger": "compact" if compacted else "session_end",
+                    "session": adapter.session_key(end.session_id),
+                    "trigger": "compact" if end.compacted else "session_end",
                     "compact_summary": summary,
                 },
                 timeout=cfg.recall_timeout,
@@ -372,6 +371,7 @@ def _graduate_session(cfg: Config, args: argparse.Namespace) -> int:
     if args.action == "regraduate":
         params["preview"] = args.preview
         params["force"] = args.force
+        params["agent"] = args.agent
     try:
         res = call(cfg, method, params)
     except RemoteError as exc:
@@ -704,6 +704,11 @@ def _knowledge_actions(actions: Any) -> None:
         help="run it on a copy of memory and show what would change",
     )
     p.add_argument("--apply", action="store_true", help="keep the last preview")
+    p.add_argument(
+        "--agent",
+        default="claude-code",
+        help="the agent whose transcript to read: built-in name or package.module:Class",
+    )
     p.add_argument(
         "--force",
         action="store_true",

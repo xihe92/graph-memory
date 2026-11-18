@@ -30,7 +30,15 @@ from pathlib import Path
 from typing import Any
 
 from ..anchors import Access, CodeAnchor, SourceRef
-from .base import AgentAdapter, PromptEvent, StopEvent, SubagentResult, Turn, path_mentions
+from .base import (
+    AgentAdapter,
+    EndEvent,
+    PromptEvent,
+    StopEvent,
+    SubagentResult,
+    Turn,
+    path_mentions,
+)
 
 WRITE_TOOLS = {
     "Edit": "file_path",
@@ -87,6 +95,25 @@ class ClaudeCodeAdapter(AgentAdapter):
             cwd=payload.get("cwd"),
             transcript_path=payload.get("transcript_path"),
         )
+
+    def parse_end_event(self, payload: dict[str, Any]) -> EndEvent | None:
+        # SessionEnd; or SessionStart with source "compact" (after a compaction) and
+        # PreCompact, which carries a trigger
+        sid = payload.get("session_id")
+        if not sid:
+            return None
+        return EndEvent(
+            session_id=str(sid),
+            compacted=payload.get("source") == "compact" or "trigger" in payload,
+            transcript_path=payload.get("transcript_path"),
+        )
+
+    def find_transcript(self, ref: str) -> tuple[str, Path] | None:
+        path = find_transcript(ref)
+        return (path.stem, path) if path else None
+
+    def read_turns(self, transcript: Path) -> list[tuple[str, Turn]]:
+        return read_turns(transcript)
 
     def compact_summary(self, transcript_path: str | None) -> str:
         if not transcript_path:

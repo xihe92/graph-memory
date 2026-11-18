@@ -60,6 +60,7 @@ class Job:
     compact_summary: str = ""
     upto: str | None = None
     transcript: str | None = None  # a rebuild reads the session's turns from here
+    agent: str = "claude-code"  # ... through this agent's adapter
     preview: bool = False  # a rebuild on a copy of memory, to look at before applying
     force: bool = False  # a long rebuild changes memory directly, without a preview first
     scope: str = ""  # a summary's scope

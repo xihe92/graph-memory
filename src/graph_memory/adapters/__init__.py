@@ -4,6 +4,7 @@ import importlib
 
 from .base import (
     AgentAdapter,
+    EndEvent,
     PromptEvent,
     StopEvent,
     SubagentResult,
@@ -15,6 +16,7 @@ from .claude_code import ClaudeCodeAdapter
 __all__ = [
     "AgentAdapter",
     "ClaudeCodeAdapter",
+    "EndEvent",
     "PromptEvent",
     "StopEvent",
     "SubagentResult",

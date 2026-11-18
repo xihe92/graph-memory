@@ -16,6 +16,7 @@ from typing import Any
 from urllib.parse import quote, unquote
 
 from .. import clock
+from ..adapters import load_adapter
 from ..adapters.base import mentioned_files
 from ..buffer import Exchange, Summary
 from ..graduation import (
@@ -42,20 +43,21 @@ REBUILD_DIRECT_PARTS = 2  # a rebuild in more parts is previewed first unless fo
 class Rebuilds(DaemonState):
     """`gm regraduate` and `gm resummarize`."""
 
-    def regraduate(self, ref: str, preview: bool = False, force: bool = False) -> dict[str, Any]:
-        """Queue a rebuild of what a session taught, read again from its transcript. With
-        `preview` it runs on a copy of memory and changes nothing until `apply_rebuild`.
-        A long session (more than REBUILD_DIRECT_PARTS parts) is always previewed first
-        unless `force`: its replay is where stale items slip in."""
-        from ..adapters.claude_code import find_transcript
-
-        sid = ref.strip().split(":", 1)[-1]
-        path = find_transcript(sid)
-        if path is None:
-            raise KeyError(f"no transcript (or more than one) for session {ref!r}")
-        session = f"claude-code:{path.stem}"
+    def regraduate(
+        self, ref: str, preview: bool = False, force: bool = False, agent: str = "claude-code"
+    ) -> dict[str, Any]:
+        """Queue a rebuild of what a session taught, read again from its transcript through
+        the agent's adapter. With `preview` it runs on a copy of memory and changes nothing
+        until `apply_rebuild`. A long session (more than REBUILD_DIRECT_PARTS parts) is
+        always previewed first unless `force`: its replay is where stale items slip in."""
+        adapter = load_adapter(agent)
+        found = adapter.find_transcript(ref.strip().split(":", 1)[-1])
+        if found is None:
+            raise KeyError(f"no transcript (or more than one) for {agent} session {ref!r}")
+        sid, path = found
+        session = adapter.session_key(sid)
         self._grad_queued[session] += 1
-        job = Job(session, REBUILD, transcript=str(path), preview=preview, force=force)
+        job = Job(session, REBUILD, transcript=str(path), agent=agent, preview=preview, force=force)
         self.grad_queue.put_nowait(job)
         return {
             "session": session,
@@ -109,11 +111,10 @@ class Rebuilds(DaemonState):
         For real, it changes memory part by part and then replaces the session's summaries
         with one. As a preview, it runs on a copy in `rebuild-preview/<session>/` and
         writes what it would change; `apply_rebuild` swaps the copy in."""
-        from ..adapters.claude_code import read_turns
-
         session, started = job.session, time.perf_counter()
         if self.ask is None or job.transcript is None:
             return
+        read_turns = load_adapter(job.agent).read_turns
         turns = [
             (ts, self._redacted(t))
             for ts, t in await asyncio.to_thread(read_turns, Path(job.transcript))
@@ -236,11 +237,11 @@ class Rebuilds(DaemonState):
 
     def rebuild_preview(self, ref: str) -> dict[str, Any]:
         """What a previewed rebuild would change."""
-        session = f"claude-code:{ref.strip().split(':', 1)[-1]}"
+        sid = ref.strip().split(":", 1)[-1]  # any agent's session, by its id or a prefix
         hits = [
             p
             for p in (self.cfg.home / "rebuild-preview").glob("*/preview.json")
-            if unquote(p.parent.name).split(":", 1)[-1].startswith(session.split(":", 1)[1])
+            if unquote(p.parent.name).split(":", 1)[-1].startswith(sid)
         ]
         if len(hits) != 1:
             raise KeyError(f"{'no' if not hits else 'more than one'} rebuild preview for {ref!r}")

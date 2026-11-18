@@ -519,8 +519,11 @@ python -m graph_memory.sim --model haiku --embedder real --json out.json   # rea
 ## Supporting another agent product
 
 - **`AgentAdapter`** (`graph_memory/adapters/base.py`): parse the product's hook payloads
-  and read a finished turn from its transcript. Use it with
-  `gm recall --agent your.module:YourAdapter` (same for `remember` and `graduate`).
+  (a prompt, a finished reply, the session ending or compacting) and read a finished turn
+  from its transcript. Use it with `gm recall --agent your.module:YourAdapter` (same for
+  `remember` and `graduate`). To let `gm knowledge regraduate --agent ...` graduate a
+  past session again, also find a session's transcript and read all its turns.
+  All agents share one memory: what one learns, another recalls.
 - **The model**: any CLI with a headless mode that reads a prompt on stdin; set
   `model_backend = "command"` and `model_command = [...]`.
 

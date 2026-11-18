@@ -3,11 +3,16 @@
 An adapter translates one agent product's hook events and transcript into neutral data:
     parse_prompt_event()  hook payload when the user submits a prompt -> PromptEvent
     parse_stop_event()    hook payload when the agent finishes        -> StopEvent
+    parse_end_event()     hook payload when the session ends or compacts -> EndEvent
     read_turn()           the finished turn from the agent's transcript -> Turn
     emit_context()        hand the recall context back to the agent (stdout by default)
+and, optionally, for `gm knowledge regraduate` (graduating a past session again):
+    find_transcript()     a session id (or a prefix of it) -> its id and transcript
+    read_turns()          every turn in a transcript, oldest first
 
 To support another product, subclass AgentAdapter and pass it as
-`gm recall --agent your.module:YourAdapter` (same for remember).
+`gm recall --agent your.module:YourAdapter` (same for remember, graduate and
+`gm knowledge regraduate`).
 """
 
 from __future__ import annotations
@@ -15,6 +20,7 @@ from __future__ import annotations
 import re
 import sys
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -35,6 +41,14 @@ class PromptEvent(BaseModel):
 class StopEvent(BaseModel):
     session_id: str
     cwd: str | None = None
+    transcript_path: str | None = None
+
+
+class EndEvent(BaseModel):
+    """The session ended, or the agent compacted its context (and the session goes on)."""
+
+    session_id: str
+    compacted: bool = False
     transcript_path: str | None = None
 
 
@@ -73,6 +87,11 @@ class AgentAdapter(ABC):
     def parse_stop_event(self, payload: dict[str, Any]) -> StopEvent: ...
 
     @abstractmethod
+    def parse_end_event(self, payload: dict[str, Any]) -> EndEvent | None:
+        """The hook payload when the session ends or compacts; None when it names no
+        session."""
+
+    @abstractmethod
     def read_turn(self, event: StopEvent) -> Turn | None:
         """The turn that just finished, or None if it can't be read."""
 
@@ -86,6 +105,16 @@ class AgentAdapter(ABC):
         """The agent's own summary from its latest context compaction, if the product
         writes one to its transcript; "" otherwise."""
         return ""
+
+    def find_transcript(self, ref: str) -> tuple[str, Path] | None:
+        """A past session's full id and its transcript, by its id or an unambiguous prefix;
+        None when there is none. The default: this product keeps no transcript to read."""
+        return None
+
+    def read_turns(self, transcript: Path) -> list[tuple[str, Turn]]:
+        """Every turn of the session's active conversation, oldest first, each with the
+        time of its reply (ISO)."""
+        return []
 
     def emit_context(self, text: str) -> None:
         if text:

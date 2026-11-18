@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,7 @@ from typing import Any
 import pytest
 
 from graph_memory import cli
+from graph_memory.adapters import AgentAdapter, EndEvent, PromptEvent, StopEvent, Turn
 from graph_memory.adapters.claude_code import find_transcript, read_turns
 from graph_memory.buffer import Summary
 from graph_memory.client import call
@@ -165,6 +167,59 @@ def test_a_rebuild_of_an_ended_session_keeps_no_buffer(
         assert "and retries?" in extract and "still waiting" not in extract
         with pytest.raises(RuntimeError, match="no transcript"):
             call(cfg, "regraduate", {"session": "zzzz"}, autostart=False)
+
+
+class LogAgent(AgentAdapter):
+    """A made-up second agent: a session's transcript is `<id>.json` in LOG_AGENT_DIR,
+    a list of [time, prompt, reply]."""
+
+    name = "log-agent"
+
+    def parse_prompt_event(self, payload: dict[str, Any]) -> PromptEvent:
+        return PromptEvent(session_id=payload["id"], prompt=payload["text"])
+
+    def parse_stop_event(self, payload: dict[str, Any]) -> StopEvent:
+        return StopEvent(session_id=payload["id"])
+
+    def parse_end_event(self, payload: dict[str, Any]) -> EndEvent | None:
+        return EndEvent(session_id=payload["id"])
+
+    def read_turn(self, event: StopEvent) -> Turn | None:
+        return None
+
+    def find_transcript(self, ref: str) -> tuple[str, Path] | None:
+        hits = sorted(Path(os.environ["LOG_AGENT_DIR"]).glob(f"{ref}*.json"))
+        return (hits[0].stem, hits[0]) if len(hits) == 1 else None
+
+    def read_turns(self, transcript: Path) -> list[tuple[str, Turn]]:
+        rows = json.loads(transcript.read_text())
+        return [(ts, Turn(prompt=q, reply=a, cwd="/w/limiter")) for ts, q, a in rows]
+
+
+def test_a_rebuild_reads_another_agents_transcript_through_its_adapter(
+    cfg: Config,  # noqa: F811
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LOG_AGENT_DIR", str(tmp_path))
+    rows = [
+        ["2026-11-01T10:01:00Z", "add a lock to the limiter", "Added a SETNX lock."],
+        ["2026-11-01T10:06:00Z", "and retries?", "acquire() retries 5 times."],
+    ]
+    (tmp_path / "9f9f-2022-bbbb.json").write_text(json.dumps(rows))
+    script = Script([LOCK])
+    agent = f"{__name__}:LogAgent"
+    with daemon_with(cfg, script) as d:
+        res = call(cfg, "regraduate", {"session": "9f9f", "agent": agent}, autostart=False)
+        assert res["session"] == "log-agent:9f9f-2022-bbbb"
+        _wait(lambda: bool(_events(cfg, "graduate")))
+        _wait(d.settled)
+        heads = d.knowledge.heads.values()
+        assert heads and all(h.sessions == ("log-agent:9f9f-2022-bbbb",) for h in heads)
+        (extract,) = [p for p in script.prompts if "distil" in p]
+        assert "add a lock" in extract and "and retries?" in extract
+        with pytest.raises(RuntimeError, match="no transcript"):  # not a Claude Code session
+            call(cfg, "regraduate", {"session": "9f9f"}, autostart=False)
 
 
 def test_a_rebuild_redacts_what_it_reads_from_the_transcript(

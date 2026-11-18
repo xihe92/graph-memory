@@ -70,7 +70,10 @@ ROUTES: dict[str, Route] = {
     "forget": lambda d, p: d.forget(str(p["session"]), str(p["id"])),
     "graduate_now": lambda d, p: d.graduate_now(str(p["session"])),
     "regraduate": lambda d, p: d.regraduate(
-        str(p["session"]), bool(p.get("preview")), bool(p.get("force"))
+        str(p["session"]),
+        bool(p.get("preview")),
+        bool(p.get("force")),
+        str(p.get("agent") or "claude-code"),
     ),
     "rebuild_preview": _rebuild_preview,
     "apply_rebuild": lambda d, p: d.apply_rebuild(str(p["session"])),

@@ -170,6 +170,20 @@ def test_events_and_session_key() -> None:
     assert isinstance(load_adapter("graph_memory.adapters:ClaudeCodeAdapter"), ClaudeCodeAdapter)
 
 
+def test_end_events_tell_a_compaction_from_a_session_end() -> None:
+    ad = ClaudeCodeAdapter()
+    end = ad.parse_end_event({"session_id": "abc", "transcript_path": "/t/abc.jsonl"})
+    assert end is not None and end.session_id == "abc" and not end.compacted
+    assert end.transcript_path == "/t/abc.jsonl"
+    after = ad.parse_end_event({"session_id": "abc", "source": "compact"})
+    assert after is not None and after.compacted  # SessionStart after a compaction
+    before = ad.parse_end_event({"session_id": "abc", "trigger": "auto"})
+    assert before is not None and before.compacted  # PreCompact
+    started = ad.parse_end_event({"session_id": "abc", "source": "startup"})
+    assert started is not None and not started.compacted
+    assert ad.parse_end_event({}) is None
+
+
 def test_compact_summary_is_the_latest_one(tmp_path: Path) -> None:
     p = tmp_path / "c.jsonl"
     _write(
