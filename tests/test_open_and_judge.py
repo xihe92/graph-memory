@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import re
 from collections.abc import Iterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -215,6 +216,38 @@ def test_a_failed_verdict_is_logged_and_turns_off_without_a_model(cfg: Config) -
     assert memory_help(read_events(events_path(cfg.home)))["judged"]["failed"] == 1
 
 
+def test_a_reply_that_corrects_a_note_does_not_strengthen_it(cfg: Config) -> None:
+    """The reply repeats the note's words to say it is wrong: by words alone that counts
+    as using it, but the judge's verdict comes first, and contradicting is not using."""
+    old = Item(
+        type=ItemType.FACT,
+        statement="recall rebuilds its whole redis lua index on every change",
+    )
+    keep = Item(type=ItemType.FACT, statement="the redis lua limiter index is kept in sqlite")
+
+    def judge(prompt: str) -> str:
+        labels = re.findall(r"^(A\d+) \[[^\]]*\] (.*)$", prompt, re.M)
+        return json.dumps(
+            {a: "contradicted" if text.startswith("recall") else "useful" for a, text in labels}
+        )
+
+    with judged_daemon(cfg, judge, [old, keep]) as d:
+        _turn(
+            cfg,
+            "s",
+            "does recall rebuild the redis lua index on every change?",
+            "No: recall no longer rebuilds its whole redis lua index on every change; "
+            "the redis lua limiter index is kept in sqlite and updated in place.",
+        )
+        _wait(lambda: bool(_events(cfg, "knowledge_use")))
+        _wait(d.settled)
+        (use,) = _events(cfg, "knowledge_use")
+        assert use["contradicted"] == [old.item_id] and use["used"] == [keep.item_id]
+        it = d.knowledge.item(old.item_id)
+        assert it.uses == 0 and it.strength == 1.0 and it.disputes == 1
+        assert d.knowledge.item(keep.item_id).uses == 1
+
+
 def test_judge_prompt_clips_long_replies() -> None:
     it = Item(type=ItemType.FACT, statement="s", why="w")
     p = build_judge_prompt("q", "x" * 10000, [it])
@@ -295,6 +328,8 @@ def test_a_contradicted_note_is_disputed_then_retracted(cfg: Config) -> None:
         assert _turn(cfg, "s3", "sqlite foreign keys default", "Off.") == []
     first, second = _events(cfg, "knowledge_dispute")
     assert (first["disputes"], first["retracted"]) == (1, False)
+    use = _events(cfg, "knowledge_use")[0]
+    assert use["contradicted"] == [ids.item_id] and use["used"] == []
     assert (second["disputes"], second["retracted"]) == (2, True)
     h = memory_help(read_events(events_path(cfg.home)), tz=UTC)["judged"]
     assert h["contradicted"] == 2 and h["misleading_rate"] == 1.0

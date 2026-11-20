@@ -314,7 +314,9 @@ Four things keep a stale note from polluting a session:
    something learned from the assistant's own explanation, is judged, not just the
    sample. A note the reply shows false (from code, docs or tool output) is
    **disputed**: shown with a warning from then on. Contradicted again, it is retracted.
-   A change the reply itself makes doesn't count: the note was right until then.
+   A change the reply itself makes doesn't count: the note was right until then. A
+   judged turn's use check waits for the verdict, so a reply that repeats a note's words
+   to correct it doesn't count as using it.
 3. **Replacement.** The next graduation states what is true now, and the merge makes the
    old item false; an answer read in the docs replaces one the assistant only explained.
 4. **Review dates.** A versioned item past its review is shown with "not re-checked

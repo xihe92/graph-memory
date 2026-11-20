@@ -184,17 +184,33 @@ class Turns(DaemonState):
         )
         recalled = self._recalled.pop(session, None)
         if recalled:
-            self._background(self._check_use(session, recalled, turn.reply, ex.id))
             # a note that could have gone stale, or that nobody checked against a source,
             # is always judged; the rest, a sample
             stale_risk = any(at_risk(i) for i in self.knowledge.get_items(recalled))
-            if (
+            judged = (
                 self.judge is not None
                 and self.cfg.knowledge_recall == "on"
                 and (stale_risk or self._rng() < self.cfg.judge_rate)
-            ):
-                self._background(self._judge(session, recalled, turn.prompt, turn.reply))
+            )
+            self._background(
+                self._after_reply(session, recalled, turn.prompt, turn.reply, ex.id, judged)
+            )
         return result
+
+    async def _after_reply(
+        self,
+        session: str,
+        item_ids: list[str],
+        prompt: str,
+        reply: str,
+        node: str | None,
+        judged: bool,
+    ) -> None:
+        """Which shown notes the reply used, after the judge's verdict when the turn is
+        judged: a reply that corrects a note repeats its words, but contradicting a note
+        is not using it, and must not make it stronger."""
+        contradicted = await self._judge(session, item_ids, prompt, reply) if judged else set()
+        await self._check_use(session, item_ids, reply, node, contradicted)
 
     def _background(self, coro: Any) -> None:
         task = asyncio.create_task(coro)
@@ -202,11 +218,18 @@ class Turns(DaemonState):
         task.add_done_callback(self._bg.discard)
 
     async def _check_use(
-        self, session: str, item_ids: list[str], reply: str, node: str | None = None
+        self,
+        session: str,
+        item_ids: list[str],
+        reply: str,
+        node: str | None = None,
+        contradicted: set[str] | None = None,
     ) -> None:
         """After the reply: which recalled items did it use? Those get stronger, and items
         used together get linked. Counted in shadow mode too: there it measures whether
-        recall picked what the reply turned out to need."""
+        recall picked what the reply turned out to need. Items the judge found the reply
+        contradicts are never counted as used."""
+        contradicted = contradicted or set()
         try:
             embed = self.embedder
             vec = await asyncio.to_thread(embed, reply[:4000]) if embed else None
@@ -217,7 +240,8 @@ class Turns(DaemonState):
             used = [
                 i.item_id
                 for i in items
-                if used_by(self.kindex, i, words, vec, k.vectors.get(i.item_id), df)
+                if i.item_id not in contradicted
+                and used_by(self.kindex, i, words, vec, k.vectors.get(i.item_id), df)
             ]
             k.mark_used(used)
             self.knowledge_dirty = True
@@ -228,18 +252,20 @@ class Turns(DaemonState):
                 recalled=item_ids,
                 used=used,
                 node=node,
+                contradicted=sorted(contradicted & set(item_ids)),
             )
         except Exception:
             log.exception("knowledge use check failed")
 
-    async def _judge(self, session: str, item_ids: list[str], prompt: str, reply: str) -> None:
+    async def _judge(self, session: str, item_ids: list[str], prompt: str, reply: str) -> set[str]:
         """A model labels each note shown for this turn useful, neutral, misleading or
         contradicted. A contradicted note is disputed: shown with a warning from then on,
-        retracted when it happens again."""
+        retracted when it happens again. Returns the contradicted notes."""
         assert self.judge is not None
         items = self.knowledge.get_items(item_ids)
+        contradicted: set[str] = set()
         if not items:
-            return
+            return contradicted
         started = time.perf_counter()
         try:
             answer = await asyncio.to_thread(self.judge, build_judge_prompt(prompt, reply, items))
@@ -254,7 +280,10 @@ class Turns(DaemonState):
                 ok=True,
             )
             for item_id, (lab, why) in found.items():
-                if lab != "contradicted" or not self.knowledge.has(item_id):
+                if lab != "contradicted":
+                    continue
+                contradicted.add(item_id)
+                if not self.knowledge.has(item_id):
                     continue
                 reason = why or f"contradicted by the reply to: {' '.join(prompt.split())[:80]}"
                 it = self.knowledge.dispute(item_id, reason)
@@ -276,6 +305,7 @@ class Turns(DaemonState):
                 ok=False,
                 error=f"{type(exc).__name__}: {exc}"[:300],
             )
+        return contradicted
 
     def forget(self, session: str, exchange_id: str) -> dict[str, Any]:
         """Remove an exchange recorded by mistake, before it can graduate."""

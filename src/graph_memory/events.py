@@ -11,7 +11,7 @@ ISO 8601) and `kind`; the other fields depend on the kind:
     buffer_dropped    session, exchanges, reason    (graduation gave up on them)
     session_cleared   session, trigger              (its folder went, nothing to learn)
     knowledge_recall  session, mode, prompt, items, scores, why, entities, seeds, reason, ms
-    knowledge_use     session, mode, recalled, used, node
+    knowledge_use     session, mode, recalled, used, node, contradicted (never counted used)
     knowledge_judge   session, items, labels, ok, ms, error   (a model's verdict per note)
     knowledge_dormant items
     knowledge_retract item, reason; knowledge_restore item
