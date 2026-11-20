@@ -348,6 +348,11 @@ Like the JVM's generations, an item's place depends on how it holds up:
 | old | strength ≥ 2: stated again by a later session (+1) or used by replies (+0.5 each) | 90 days |
 | dormant | vitality (strength halved per half-life since last seen or used) below 0.25 | kept, not recalled; keeps fading at 14 days |
 
+Half-lives count **active days**: the local dates on which a prompt you typed reached
+graph-memory (kept in memory.db's `active_day` table). Time away ages nothing. A project's
+notes count only the days you worked in that project; global and topic notes count every
+active day. Review dates of notes likely to change stay on calendar time.
+
 A dormant item comes back when a session states it again. Nothing is deleted.
 
 **Use** is checked after each reply, without a model: a recalled item counts as used when
@@ -515,13 +520,15 @@ your own with `redact_patterns`. Claude Code's own transcripts are not changed.
 `graph_memory.sim` replays scripted users against a real daemon through the real hooks,
 with simulated time, so weeks of use run in seconds:
 
-- A **scenario** (`sim/scenario.py`) is sessions in projects (temporary git repos), turns
-  with prompt, reply and files touched, compactions, session ends, `advance(days=…)`,
-  daemon restarts (with downtime), and model failures. **Facts** are the knowledge the
-  turns contain; a turn names the facts it teaches (`learn`), the facts recall must show
-  or must not show (`has`, `lacks`, `allow`, `nothing`), and the recalled facts its reply
-  uses or ignores (`used`, `unused`). `check` asserts an item's area, strength, uses,
-  validity and number of copies; `check_fn` anything else.
+- A **scenario** (`sim/scenario.py`) is sessions in projects (temporary git repos),
+  turns with prompt, reply and files touched, compactions, session ends,
+  `advance(days=…)` (with `working=` a project, or True, each day is a day you worked;
+  otherwise you were away), daemon restarts (with downtime), and model failures.
+  **Facts** are the knowledge the turns contain; a turn names the facts it teaches
+  (`learn`), the facts recall must show or must not show (`has`, `lacks`, `allow`,
+  `nothing`), and the recalled facts its reply uses or ignores (`used`, `unused`).
+  `check` asserts an item's area, strength, uses, validity and number of copies;
+  `check_fn` anything else.
 - The **simulator** (`sim/harness.py`) does what Claude Code does: fires
   UserPromptSubmit (`gm recall`), writes the turn to a JSONL transcript in Claude Code's
   format, fires Stop (`gm remember`), writes a compact summary and fires
@@ -534,12 +541,13 @@ with simulated time, so weeks of use run in seconds:
   `--embedder real`.
 
 The library (`sim/scenarios/`): cross-session recall, compaction, superseded decisions,
-reinforcement, use and co-use edges, decay and revival, open items (closed by a later
-session or by hand, and recalled by "where were we?"), the buffer's lifecycle, a slow
-session of questions (what was learned and where from, one rolling summary), knowledge
-going stale (disputed, superseded, retracted), deleting with bridges and undo, topic
-scopes, a project's summary (cited, out of date after a change), project isolation, entity names, crashes and restarts, model failures, noise, and a generated
-scale test (5 projects, 180 items).
+reinforcement, use and co-use edges, decay and revival, time away (notes age only on
+days you work), open items (closed by a later session or by hand, and recalled by "where
+were we?"), the buffer's lifecycle, a slow session of questions (what was learned and
+where from, one rolling summary), knowledge going stale (disputed, superseded,
+retracted), deleting with bridges and undo, topic scopes, a project's summary (cited,
+out of date after a change), project isolation, entity names, crashes and restarts,
+model failures, noise, and a generated scale test (5 projects, 180 items).
 
 ```sh
 uv run pytest tests/test_simulation.py          # all scenarios, oracle + hash embedder

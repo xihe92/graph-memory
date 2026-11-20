@@ -32,7 +32,12 @@ class Turns(DaemonState):
         """The UserPromptSubmit hook: the notes for this prompt, as context for Claude
         (none in shadow mode, where recall is only logged)."""
         prompt = self.redact(prompt)
-        self._seen(session, project_of([], cwd) if cwd else None)
+        here = project_of([], cwd) if cwd else None
+        self._seen(session, here)
+        # a prompt you typed (the hook skips programs and notifications): today is a day
+        # you worked, which notes age by
+        if self.knowledge.mark_active(here):
+            self.knowledge_dirty = True
         self._asking[session] = (prompt, clock.now())
         context: dict[str, Any] = {}
         if self.cfg.knowledge_recall in ("shadow", "on"):

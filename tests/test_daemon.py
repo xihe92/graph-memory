@@ -10,11 +10,12 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import replace
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
 
-from graph_memory import cli
+from graph_memory import cli, clock
 from graph_memory.client import DaemonUnavailable, RemoteError, call
 from graph_memory.config import Config, load_config
 from graph_memory.daemon import Daemon
@@ -115,6 +116,19 @@ def test_hook_commands_print_knowledge_and_never_fail(
         assert out.startswith("<graph-memory>\nKnowledge from earlier sessions")
         assert "saka" in out and "Memory of" not in out  # no topic documents any more
 
+        assert daemon.knowledge.days.count() == 1  # a prompt you typed: a day you worked
+
+        # a background-task notification the next day is not a prompt you typed
+        monkeypatch.setattr(clock, "_offset", timedelta(days=1))
+        note = {"session_id": "new", "prompt": "<task-notification>done</task-notification>"}
+        monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(note)))
+        assert cli.main(["recall"]) == 0
+        assert daemon.knowledge.days.count() == 1
+        monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+        assert cli.main(["recall"]) == 0
+        capsys.readouterr()
+        assert daemon.knowledge.days.count() == 2
+
         monkeypatch.setattr(sys, "stdin", io.StringIO("{not json"))
         assert cli.main(["remember"]) == 0  # logged, not raised
 
@@ -165,6 +179,7 @@ def test_headless_sessions_are_skipped_unless_configured(
     try:
         monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "sdk-cli")
         assert hooks() == ("", 0)  # nothing shown, nothing stored
+        assert daemon.knowledge.days.count() == 0  # and not a day you worked
 
         (cfg.home / "config.toml").write_text("remember_headless = true\n")
         out, added = hooks()

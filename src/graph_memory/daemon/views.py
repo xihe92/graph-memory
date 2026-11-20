@@ -158,7 +158,7 @@ class Views(DaemonState):
             if not lean:
                 out.update(
                     why=i.why,
-                    vitality=round(i.vitality(now), 2),
+                    vitality=round(i.vitality(k.days, now), 2),
                     sources=[s.model_dump(mode="json") for s in i.sources],
                     origin=i.origin.value,
                     ref=i.ref,
@@ -290,7 +290,7 @@ class Views(DaemonState):
         return {
             "version": k.version,
             "item": item.model_dump(mode="json"),
-            "vitality": round(item.vitality(), 3),
+            "vitality": round(item.vitality(k.days), 3),
             "checked": item.checked.isoformat(),
             "review_due": due.isoformat() if due else None,
             "overdue": item.overdue(),

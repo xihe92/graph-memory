@@ -247,7 +247,7 @@ def test_an_older_memory_db_gets_its_word_index_once(tmp_path: Path) -> None:
     again.close()
     conn = sqlite3.connect(tmp_path / "memory.db")
     assert conn.execute("SELECT value FROM meta WHERE key = 'words'").fetchone() == ("1",)
-    assert conn.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone() == ("2",)
+    assert conn.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone() == ("3",)
     conn.close()
     assert KnowledgeStore(tmp_path, topic_embed).word_differences() == []
 
@@ -274,6 +274,37 @@ def test_differences_finds_what_differs(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- moving
 
 
+def test_an_older_memory_db_gets_its_active_days_once(tmp_path: Path) -> None:
+    """A memory.db from before active days were kept (schema 2) gets them, when first
+    opened, from the dates it records work on: its graduations and its notes' times."""
+    from graph_memory.active_days import local_date
+
+    k = KnowledgeStore(tmp_path, topic_embed)
+    assert k.days.rows() == []  # a new memory: nothing to fill in
+    a, b = _memory(k)  # a segment at T0 that taught a; b, a project note, learned now
+    k.save()
+    k.close()
+    conn = sqlite3.connect(tmp_path / "memory.db")
+    conn.executescript(
+        "DROP TABLE active_day; DELETE FROM meta WHERE key = 'days';"
+        " UPDATE meta SET value = '2' WHERE key = 'schema';"
+    )
+    conn.close()
+    again = KnowledgeStore(tmp_path, topic_embed)
+    t0, today = local_date(T0).isoformat(), local_date(b.created_at).isoformat()
+    want = {(t0, "global"), (today, "global"), (today, "repo:/w/x")}
+    assert set(again.days.rows()) == want
+    again.save()
+    again.close()
+    conn = sqlite3.connect(tmp_path / "memory.db")
+    assert set(conn.execute("SELECT date, scope FROM active_day")) == want
+    assert conn.execute("SELECT value FROM meta WHERE key = 'days'").fetchone() == ("1",)
+    conn.execute("DELETE FROM active_day")
+    conn.commit()
+    conn.close()
+    assert KnowledgeStore(tmp_path, topic_embed).days.rows() == []  # filled once only
+
+
 def _json_memory(home: Path, work: Path) -> KnowledgeStore:
     """A memory in the JSON files from before SQLite, in `home` (written by `gm export`
     from one built in `work`)."""
@@ -282,6 +313,7 @@ def _json_memory(home: Path, work: Path) -> KnowledgeStore:
     noise = k.add_item(Item(type=ItemType.FACT, statement="noise worth deleting"))
     k.delete([noise.item_id], "noise")
     k.set_summaries({"repo:/w/x": {"overview": "a limiter"}})
+    k.mark_active("repo:/w/x", T0)
     k.save()
     export_json(k, home)
     return k
@@ -304,7 +336,8 @@ def test_gm_migrate_moves_json_into_sqlite_and_keeps_the_files(
     assert cli.main(["migrate", "--dry-run"]) == 0
     out = capsys.readouterr().out
     assert "3 items" not in out and "2 items, 1 entities, 1 edges, 1 graduations" in out
-    assert "1 deletions, 1 summaries" in out and not (home / "memory.db").exists()
+    assert "1 deletions, 1 summaries, 2 active days" in out
+    assert not (home / "memory.db").exists()
 
     assert cli.main(["migrate"]) == 0
     assert "now in" in capsys.readouterr().out
@@ -315,6 +348,7 @@ def test_gm_migrate_moves_json_into_sqlite_and_keeps_the_files(
     after = KnowledgeStore(home, topic_embed)
     assert after.backend.name == "sqlite" and differences(before, read_db(after.backend)) == []
     assert after.word_differences() == []  # its word index was built by the move
+    assert len(after.days.rows()) == 2  # its active days came along
     with tarfile.open(next(home.glob("archive-*-json.tar.gz"))) as tar:
         assert set(tar.getnames()) == {
             "knowledge.json",

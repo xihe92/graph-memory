@@ -446,7 +446,7 @@ def recall(
                 for i in index.visible(here.scopes())
                 if heads[i].type is ItemType.PREFERENCE and i not in skip and i not in have
             ),
-            key=lambda i: -heads[i].vitality(now),
+            key=lambda i: -heads[i].vitality(store.days, now),
         )[: pol.standing]
     )
     if prefs:
@@ -601,7 +601,7 @@ def _ranked(
     # used or seen again often counts up to 1.0
     now = clock.now()
     scored = [
-        (u, m * (0.6 + 0.4 * min(1.0, heads[u].vitality(now) / 3)))
+        (u, m * (0.6 + 0.4 * min(1.0, heads[u].vitality(store.days, now) / 3)))
         for u, m in mass.items()
         if u in heads and heads[u].recallable and here.sees(heads[u].scope)
     ]

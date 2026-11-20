@@ -122,6 +122,9 @@ class End:
 class Advance:
     seconds: float
     label: str = ""
+    # each day passed was a day you worked: True outside any project, or in the project
+    # named; False: you were away (notes age only on days you work)
+    working: bool | str = False
 
 
 @dataclass
@@ -357,11 +360,21 @@ class Scenario:
         return SessionBuilder(self, name, project)
 
     def advance(
-        self, *, days: float = 0, hours: float = 0, minutes: float = 0, label: str = ""
+        self,
+        *,
+        days: float = 0,
+        hours: float = 0,
+        minutes: float = 0,
+        label: str = "",
+        working: bool | str = False,
     ) -> None:
         """Let time pass. The daemon's maintenance runs afterwards: idle sessions graduate
-        and faded knowledge goes dormant."""
-        self.steps.append(Advance(days * 86400 + hours * 3600 + minutes * 60, label))
+        and faded knowledge goes dormant. Notes age only on days you work: `working` makes
+        each day that passes one (True: outside any project; a project: in it), as if you
+        typed prompts that recalled nothing worth using; otherwise you were away."""
+        if isinstance(working, str) and working not in self.projects:
+            raise KeyError(f"unknown project {working!r}")
+        self.steps.append(Advance(days * 86400 + hours * 3600 + minutes * 60, label, working))
 
     def restart(self, *, hours: float = 0, label: str = "") -> None:
         """Stop the daemon and start a new one from what is on disk, optionally after

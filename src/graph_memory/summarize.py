@@ -16,6 +16,7 @@ import logging
 from collections.abc import Callable, Sequence
 from typing import Any
 
+from .active_days import ActiveDays
 from .graduation import GraduationError, _json_obj
 from .knowledge import Item, ItemType
 
@@ -91,19 +92,23 @@ def stamp(item: Item) -> str:
     return hashlib.sha1(text.encode()).hexdigest()[:10]
 
 
-def select(items: Sequence[Item], budget: int = MAX_CHARS) -> tuple[list[Item], int]:
-    """The items a brief reads, by type then by how alive they are, and how many were
-    left out because the prompt was full (the least alive go first)."""
+def select(
+    items: Sequence[Item], days: ActiveDays | None = None, budget: int = MAX_CHARS
+) -> tuple[list[Item], int]:
+    """The items a brief reads, by type then by how alive they are (aged by `days`, the
+    store's active days), and how many were left out because the prompt was full (the
+    least alive go first)."""
+    days = days or ActiveDays()
     kept: list[Item] = []
     used = 0
-    for it in sorted(items, key=lambda i: -i.vitality()):
+    for it in sorted(items, key=lambda i: -i.vitality(days)):
         size = len(it.statement) + len(it.why) + 40
         if kept and used + size > budget:
             continue
         kept.append(it)
         used += size
     order = {t: n for n, t in enumerate(_TYPE_ORDER)}
-    kept.sort(key=lambda i: (order.get(i.type, len(order)), -i.vitality(), i.created_at))
+    kept.sort(key=lambda i: (order.get(i.type, len(order)), -i.vitality(days), i.created_at))
     return kept, len(items) - len(kept)
 
 

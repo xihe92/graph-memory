@@ -14,6 +14,7 @@ SCENARIOS: dict[str, Callable[[], Scenario]] = {
     "reinforce": core.reinforce,
     "use_and_hebbian": core.use_and_hebbian,
     "decay": core.decay,
+    "away": core.away,
     "resolve_open": lifecycle.resolve_open,
     "buffer_lifecycle": buffer.buffer_lifecycle,
     "qa_learning": learning.qa_learning,

@@ -39,6 +39,7 @@ from ..config import Config, load_config
 from ..daemon import Daemon
 from ..events import EventLog, events_path
 from ..knowledge import Item, KnowledgeStore
+from ..projects import project_of
 from ..vectors import Embedder
 from .embed import hash_embed
 from .oracle import OracleModel, kind_of
@@ -423,6 +424,20 @@ class Simulator:
             )
         return self.sessions[name]
 
+    def _work_days(self, step: Advance) -> None:
+        """Move the clock a day at a time, each a day you worked (see Scenario.advance):
+        the daemon is idle between steps, so its store is marked directly."""
+        assert self.daemon is not None
+        project = None
+        if isinstance(step.working, str):
+            project = project_of([], str(self.repos[step.working]))
+        left = step.seconds
+        while left > 0:
+            clock.advance(seconds=min(left, 86400.0))
+            left -= 86400.0
+            if self.store.mark_active(project, clock.now()):
+                self.daemon.knowledge_dirty = True
+
     # ------------------------------------------------------------------ state, for checks
 
     @property
@@ -517,7 +532,10 @@ class Simulator:
         if isinstance(step, End):
             return self._end(n, step)
         if isinstance(step, Advance):
-            clock.advance(seconds=step.seconds)
+            if step.working:
+                self._work_days(step)
+            else:
+                clock.advance(seconds=step.seconds)
             got = self._call("maintain")
             self.settle()
             errors = self._hook_errors(self._new_events())
@@ -804,7 +822,7 @@ class Simulator:
             if st.count != 0:
                 problems.append("no item states it")
         else:
-            v = cur.vitality(clock.now())
+            v = cur.vitality(self.store.days, clock.now())
             if st.area is not None and cur.area.value != st.area:
                 problems.append(f"area {cur.area.value}, expected {st.area}")
             if st.min_strength is not None and cur.strength < st.min_strength:

@@ -67,7 +67,7 @@ class Summaries(DaemonState):
         scope = job.scope
         started = time.perf_counter()
         assert self.ask is not None
-        items, left_out = select(self._scope_items(scope))
+        items, left_out = select(self._scope_items(scope), self.knowledge.days)
         name, label = self._scope_label(scope)
         try:
             if not items:

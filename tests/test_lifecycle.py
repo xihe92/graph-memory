@@ -21,20 +21,43 @@ def item(k: KnowledgeStore, text: str, **kw: object) -> Item:
     return k.add_item(Item(type=ItemType.FACT, statement=text, **kw))  # type: ignore[arg-type]
 
 
+def work(k: KnowledgeStore, days: int, start: datetime = NOW) -> None:
+    """You typed prompts on each of the `days` days after `start`."""
+    for d in range(1, days + 1):
+        k.mark_active(None, start + timedelta(days=d))
+
+
 def test_vitality_decays_by_area_and_promotion(tmp_path: Path) -> None:
     k = KnowledgeStore(tmp_path, topic_embed)
     a = item(k, "redis lua script for acquire", last_seen=NOW)
-    assert a.area is Area.SURVIVOR and a.vitality(NOW) == 1.0
-    assert abs(a.vitality(NOW + timedelta(days=14)) - 0.5) < 1e-9
+    work(k, 90)
+    assert a.area is Area.SURVIVOR and a.vitality(k.days, NOW) == 1.0
+    assert abs(a.vitality(k.days, NOW + timedelta(days=14)) - 0.5) < 1e-9
     k.reinforce(a.item_id, "seg")  # seen again in a later session
     assert a.area is Area.OLD and a.strength == 2.0
     a.last_seen = NOW
-    assert abs(a.vitality(NOW + timedelta(days=90)) - 1.0) < 1e-9  # old: 90-day half-life
+    old = a.vitality(k.days, NOW + timedelta(days=90))
+    assert abs(old - 1.0) < 1e-9  # old: 90-day half-life
+
+
+def test_notes_age_only_on_days_you_work(tmp_path: Path) -> None:
+    k = KnowledgeStore(tmp_path, topic_embed)
+    a = item(k, "redis lua script for acquire", last_seen=NOW)
+    away = NOW + timedelta(days=60)
+    assert a.vitality(k.days, away) == 1.0 and k.sweep(away) == []  # 60 days away
+    work(k, 10, start=away)
+    assert abs(a.vitality(k.days, away + timedelta(days=10)) - 0.5 ** (10 / 14)) < 1e-9
+    # project notes age by the days you work in their project only
+    p = item(k, "acquire retries five times", scope="repo:/w/a", last_seen=NOW)
+    assert p.vitality(k.days, away + timedelta(days=10)) == 1.0
+    k.mark_active("repo:/w/a", away + timedelta(days=11))
+    assert abs(p.vitality(k.days, away + timedelta(days=11)) - 0.5 ** (1 / 14)) < 1e-9
 
 
 def test_unused_survivors_go_dormant_and_come_back(tmp_path: Path) -> None:
     k = KnowledgeStore(tmp_path, topic_embed)
     a = item(k, "redis lua script for acquire", last_seen=NOW)
+    work(k, 30)
     assert k.sweep(NOW + timedelta(days=20)) == []
     assert k.sweep(NOW + timedelta(days=30)) == [a.item_id]
     assert a.area is Area.DORMANT and not a.recallable

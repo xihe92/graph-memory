@@ -47,6 +47,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from . import clock
+from .active_days import ActiveDays
 from .storage import DB_FILE as DB_FILE  # the file names are imported from here elsewhere
 from .storage import DELETED_FILE as DELETED_FILE
 from .storage import KNOWLEDGE_FILE as KNOWLEDGE_FILE
@@ -273,10 +274,12 @@ class Item(BaseModel):
     def overdue(self, now: datetime | None = None) -> bool:
         return _overdue(self.volatility, self.checked, now)
 
-    def vitality(self, now: datetime | None = None) -> float:
-        """Strength decayed by time since it was last seen or used, with the half-life of
-        its area: 14 days for a survivor, 90 for an old item."""
-        return _vitality(self.strength, self.area, self.last_seen, self.last_used, now)
+    def vitality(self, days: ActiveDays, now: datetime | None = None) -> float:
+        """Strength decayed by the active days since it was last seen or used, with the
+        half-life of its area: 14 days for a survivor, 90 for an old item."""
+        return _vitality(
+            self.strength, self.area, self.scope, self.last_seen, self.last_used, days, now
+        )
 
     @property
     def recallable(self) -> bool:
@@ -305,13 +308,16 @@ def _overdue(volatility: Volatility, checked: datetime, now: datetime | None = N
 def _vitality(
     strength: float,
     area: Area,
+    scope: str,
     last_seen: datetime,
     last_used: datetime | None,
+    days: ActiveDays,
     now: datetime | None = None,
 ) -> float:
-    ref = max(last_seen, last_used or last_seen)
-    age = ((now or _now()) - ref).total_seconds() / 86400
-    return float(strength * 0.5 ** (max(age, 0.0) / HALF_LIFE_DAYS[area]))
+    """Strength halved every half-life, counted in the days you worked (in the note's
+    project, for a project note) since it was last seen or used: time away ages nothing."""
+    age = days.age(max(last_seen, last_used or last_seen), scope, now)
+    return float(strength * 0.5 ** (age / HALF_LIFE_DAYS[area]))
 
 
 def _recallable(valid: bool, area: Area, volatility: Volatility, checked: datetime) -> bool:
@@ -364,8 +370,10 @@ class Head:
     def overdue(self, now: datetime | None = None) -> bool:
         return _overdue(self.volatility, self.checked, now)
 
-    def vitality(self, now: datetime | None = None) -> float:
-        return _vitality(self.strength, self.area, self.last_seen, self.last_used, now)
+    def vitality(self, days: ActiveDays, now: datetime | None = None) -> float:
+        return _vitality(
+            self.strength, self.area, self.scope, self.last_seen, self.last_used, days, now
+        )
 
     @property
     def recallable(self) -> bool:
@@ -547,7 +555,10 @@ class KnowledgeStore:
         self._worded: set[str] = set()  # ... written since the last commit
         self._vec_meta: set[str] = set()  # items whose scope or recallability to re-file
         self._docs, self._doc_len = 0, 0  # the word index: notes, and their total length
+        self._days_filled = False  # the active days were just filled in, see _fill_days()
         self._topics: tuple[int, dict[str, str]] | None = None
+        self.days = ActiveDays()  # the days you worked, which notes age by
+        self._new_days: list[tuple[str, str]] = []  # ... added since the last save
         self._load()
         self._due = self._due_now()
 
@@ -674,6 +685,9 @@ class KnowledgeStore:
             self.edit(i).area = Area.OLD
             self._refile(i)
             self._unflushed[("item", i)] = None
+        self.days = ActiveDays(b.active_days())
+        if b.needs_days:
+            self._fill_days()
         # items learned before they kept their sources get them from their graduations
         for i in sourceless:
             it = self.edit(i)
@@ -686,6 +700,33 @@ class KnowledgeStore:
             else:
                 del self._items[i]
                 self._unflushed.pop(("item", i), None)
+
+    def _fill_days(self) -> None:
+        """A memory from before active days were kept: its active days are the dates
+        it already records work on, which are the times of its graduated exchanges and
+        the times its notes were learned, seen again and used. Done once."""
+        b = self.backend
+        new: list[tuple[str, str]] = []
+        for h in self.heads.values():
+            for when in (h.created_at, h.last_seen, h.last_used):
+                if when is not None:
+                    new += self.days.add(when, h.scope)
+        scopes = {i: h.scope for i, h in self.heads.items()}
+        for body in b.scan("segment"):
+            seg = Segment.model_validate_json(body)
+            projects: set[str | None] = {scopes[i] for i in seg.items if i in scopes} or {None}
+            for when in (seg.start, seg.end):
+                for project in projects:
+                    new += self.days.add(when, project)
+        self._new_days += new
+        self._days_filled = True
+
+    def mark_active(self, project: str | None = None, now: datetime | None = None) -> bool:
+        """You typed a prompt (in `project`, if any): today is an active day. True when
+        that is new, and so to be saved."""
+        new = self.days.add(now or _now(), project)
+        self._new_days += new
+        return bool(new)
 
     @staticmethod
     def _head_of_row(row: tuple[Any, ...]) -> Head:
@@ -717,9 +758,11 @@ class KnowledgeStore:
     def flush(self) -> None:
         """Write the changed objects not written yet into the open transaction, so a
         query sees them. save() commits them."""
-        if not self._unflushed:
+        if not self._unflushed and not self._new_days and not self._days_filled:
             return
         b = self.backend
+        if self._new_days or self._days_filled:
+            b.add_days(self._new_days, filled=self._days_filled)
         pending: dict[str, dict[Any, Any]] = {
             "item": self._items,
             "entity": self._entities,
@@ -759,6 +802,8 @@ class KnowledgeStore:
             self._docs, self._doc_len = self.backend.doc_stats()
             raise
         self._worded.clear()
+        self._new_days.clear()
+        self._days_filled = False
         # what was changed is read-only from here on: a change to it would be lost
         for obj in self._items.values():
             if obj is not None:
@@ -1290,7 +1335,7 @@ class KnowledgeStore:
         faded = [
             i
             for i, h in self.heads.items()
-            if h.valid and h.area is not Area.DORMANT and h.vitality(now) < DORMANT_BELOW
+            if h.valid and h.area is not Area.DORMANT and h.vitality(self.days, now) < DORMANT_BELOW
         ]
         for i in faded:
             self.edit(i).area = Area.DORMANT
@@ -1551,6 +1596,7 @@ class KnowledgeStore:
             "segments": self.backend.count("segment"),
             "by_type": dict(Counter(h.type.value for h in valid)),
             "by_area": dict(Counter(h.area.value for h in valid)),
+            "active_days": self.days.count(),
         }
 
     def differences(self, other: KnowledgeStore) -> list[str]:
@@ -1570,6 +1616,8 @@ class KnowledgeStore:
             out.append("edges differ")
         if (self._docs, self._doc_len) != (other._docs, other._doc_len):
             out.append("word index size differs")
+        if self.days != other.days:
+            out.append("active days differ")
         return out
 
     # ------------------------------------------------------------------ deleting

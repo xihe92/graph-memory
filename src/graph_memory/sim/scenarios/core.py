@@ -450,8 +450,8 @@ def _co_used(at_least: float) -> Callable[[Simulator], str | None]:
 def decay() -> Scenario:
     s = Scenario(
         "decay",
-        "unused survivors fade to dormant in about four weeks and stop being recalled; old "
-        "items last much longer; a dormant item stated again comes back",
+        "unused survivors fade to dormant in about four weeks of work and stop being "
+        "recalled; old items last much longer; a dormant item stated again comes back",
     )
     lim = limiter_facts(s)
     teach_limiter(s, lim)
@@ -465,10 +465,10 @@ def decay() -> Scenario:
     b.end()
     s.check("compose", area="old")
     s.check("lock", area="survivor")
-    s.advance(days=20)
+    s.advance(days=20, working=lim)
     s.check("lock", area="survivor", label="after 20 days a survivor is fading but recallable")
     s.probe("is acquire() protected by a redis lock?", lim, has=["lock"], allow=["skew", "compose"])
-    s.advance(days=12)
+    s.advance(days=12, working=lim)
     s.check("lock", area="dormant", label="after 32 days unused it is dormant")
     s.check("compose", area="old", label="an old item outlives it")
     s.probe(
@@ -502,6 +502,44 @@ def decay() -> Scenario:
         has=["lock"],
         allow=["skew", "compose", "terse"],
     )
-    s.advance(days=300)
+    s.advance(days=300, working=lim)
     s.check("compose", area="dormant", label="even old items fade after months unused")
+    return s
+
+
+def away() -> Scenario:
+    s = Scenario(
+        "away",
+        "notes age only on days you work: weeks away fade nothing; weeks in another project "
+        "fade only global notes; weeks here without a note fade it, while an old one lasts",
+    )
+    lim = limiter_facts(s)
+    billing = s.project("billing")
+    teach_limiter(s, lim)
+    b = s.session("b", lim)
+    b.turn(
+        "tests can't connect to redis",
+        "As before: `docker compose up redis`, then pytest.",
+        learn=["compose"],
+        allow=["compose", "lock", "skew", "terse"],
+    )
+    b.end()
+    s.restart(hours=45 * 24, label="45 days away, the daemon stopped")
+    s.advance(minutes=5, label="maintenance runs")
+    s.check("lock", area="survivor", label="after 45 days away it has not faded")
+    s.check("terse", area="survivor")
+    s.probe("is acquire() protected by a redis lock?", lim, has=["lock"], allow=["skew", "compose"])
+    s.advance(days=40, working=billing, label="40 days of work in another project")
+    s.check("lock", area="survivor", label="a project's notes do not fade meanwhile")
+    s.check("terse", area="dormant", label="a global note unused all along does")
+    s.advance(days=30, working=lim, label="30 days of work here without the notes")
+    s.check("lock", area="dormant", label="unused for 30 working days: dormant")
+    s.check("compose", area="old", label="an old note outlives it")
+    s.probe(
+        "is acquire() protected by a redis lock?",
+        lim,
+        lacks=["lock"],
+        allow=["skew", "compose"],
+        label="dormant notes are not recalled",
+    )
     return s

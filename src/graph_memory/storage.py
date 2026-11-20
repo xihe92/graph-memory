@@ -6,6 +6,8 @@
     word, doc                    recall's word index: for each note recall can show, how
                                  often each of its words occurs, and its length
     deleted, summary             deletions that can be undone; project and topic summaries
+    active_day                   the dates you worked, in all and per project, which
+                                 notes age by (see active_days.py)
 
 The store (knowledge.py) keeps only small fields in memory and reads the rest from here
 by id. Its changes go into an open transaction, which its save() commits, so notes, their
@@ -37,7 +39,7 @@ DELETED_FILE = "knowledge_deleted.jsonl"
 SUMMARY_FILE = "summaries.json"
 JSON_FILES = (KNOWLEDGE_FILE, VECTORS_FILE, DELETED_FILE, SUMMARY_FILE)
 KNOWLEDGE_SCHEMA = 1
-DB_SCHEMA = 2  # 2: the word index
+DB_SCHEMA = 3  # 2: the word index; 3: active days
 
 
 class StorageError(RuntimeError):
@@ -97,6 +99,11 @@ _WORD_TABLES = (
     "CREATE TABLE IF NOT EXISTS doc(item TEXT PRIMARY KEY, len INTEGER)",
 )
 
+_DAY_TABLE = (
+    "CREATE TABLE IF NOT EXISTS active_day(date TEXT, scope TEXT, PRIMARY KEY (date, scope))"
+    " WITHOUT ROWID"
+)
+
 _CHUNK = 500  # ids per IN (...) query
 
 
@@ -118,8 +125,9 @@ class SqliteBackend:
         # set up a new file, or bring an older one up to date; a current one is only
         # read here, so opening it never waits for (or blocks) the daemon's writes
         new = c.execute("SELECT 1 FROM sqlite_master WHERE name = 'item'").fetchone() is None
-        old = not new and (
-            c.execute("SELECT 1 FROM sqlite_master WHERE name = 'doc'").fetchone() is None
+        old = not new and any(
+            c.execute("SELECT 1 FROM sqlite_master WHERE name = ?", (t,)).fetchone() is None
+            for t in ("doc", "active_day")
         )
         if new:
             c.execute("BEGIN IMMEDIATE")
@@ -149,16 +157,20 @@ class SqliteBackend:
             c.execute("BEGIN IMMEDIATE")
         if new or old:
             c.execute("CREATE INDEX IF NOT EXISTS segment_session ON segment(session)")
-            for sql in _WORD_TABLES:
+            for sql in (*_WORD_TABLES, _DAY_TABLE):
                 c.execute(sql)
             c.execute("INSERT OR REPLACE INTO meta VALUES ('schema', ?)", (str(DB_SCHEMA),))
-            if new:
-                c.execute("INSERT OR REPLACE INTO meta VALUES ('words', '1')")  # empty: built
+            if new:  # empty: built and filled
+                c.execute("INSERT OR REPLACE INTO meta VALUES ('words', '1')")
+                c.execute("INSERT OR REPLACE INTO meta VALUES ('days', '1')")
             c.execute("COMMIT")
         # the word index is built by the store (it splits the words) the first time it
         # opens a memory, and marked built in the same transaction
         row = c.execute("SELECT value FROM meta WHERE key = 'words'").fetchone()
         self.needs_words = row is None
+        # likewise the active days of a memory from before they were kept
+        row = c.execute("SELECT value FROM meta WHERE key = 'days'").fetchone()
+        self.needs_days = row is None
         self.vectors = SqliteVectorIndex(c, self.begin)
 
     def begin(self) -> None:
@@ -416,6 +428,18 @@ class SqliteBackend:
         self.begin()
         self.conn.execute("DELETE FROM deleted WHERE batch = ?", (batch_id,))
 
+    def active_days(self) -> list[tuple[str, str]]:
+        return [tuple(r) for r in self.conn.execute("SELECT date, scope FROM active_day")]
+
+    def add_days(self, rows: Iterable[tuple[str, str]], *, filled: bool = False) -> None:
+        """Add active days (date, scope); `filled`: the one-time fill is done. Committed
+        with the store's save."""
+        self.begin()
+        self.conn.executemany("INSERT OR IGNORE INTO active_day VALUES (?, ?)", rows)
+        if filled:
+            self.conn.execute("INSERT OR REPLACE INTO meta VALUES ('days', '1')")
+            self.needs_days = False
+
     def summaries(self) -> dict[str, Any]:
         return {s: json.loads(b) for s, b in self.conn.execute("SELECT scope, body FROM summary")}
 
@@ -469,6 +493,9 @@ class Image:
     kinds: dict[str, str] = field(default_factory=dict)  # vector id -> "item" or "entity"
     deletions: list[dict[str, Any]] = field(default_factory=list)
     summaries: dict[str, Any] = field(default_factory=dict)
+    # (date, scope), oldest first; None for JSON files from before they were kept, whose
+    # store fills them in from the notes when it first opens them
+    active_days: list[tuple[str, str]] | None = None
 
     def rows(self) -> dict[str, list[dict[str, Any]]]:
         return {
@@ -487,6 +514,7 @@ class Image:
             "vectors": len(self.vectors),
             "deletions": len(self.deletions),
             "summaries": len(self.summaries),
+            "active days": len(self.active_days or ()),
         }
 
 
@@ -500,6 +528,8 @@ def read_json(home: Path) -> Image:
         img.entities = list(data.get("entities") or [])
         img.edges = list(data.get("edges") or [])
         img.segments = list(data.get("segments") or [])
+        if "active_days" in data:
+            img.active_days = sorted((str(d), str(s)) for d, s in data["active_days"])
     if (home / VECTORS_FILE).exists():
         ix = JsonVectorIndex(home / VECTORS_FILE)
         known = {"item": {i["item_id"] for i in img.items}}
@@ -537,6 +567,8 @@ def write_json(img: Image, dest: Path) -> None:
         "edges": img.edges,
         "segments": img.segments,
     }
+    if img.active_days is not None:
+        payload["active_days"] = img.active_days
     atomic_write(dest / KNOWLEDGE_FILE, json.dumps(payload, indent=1))
     ix = JsonVectorIndex(dest / VECTORS_FILE)
     for i, v in img.vectors.items():
@@ -564,6 +596,8 @@ def read_db(db: SqliteBackend) -> Image:
                 img.kinds[r[key]] = kind
     img.deletions = db.deletions()
     img.summaries = db.summaries()
+    if not db.needs_days:
+        img.active_days = sorted(db.active_days())
     return img
 
 
@@ -590,6 +624,10 @@ def write_db(img: Image, db: SqliteBackend) -> None:
             db.log_deletion(batch)
         if img.summaries:
             db.set_summaries(img.summaries)
+        db.conn.execute("DELETE FROM active_day")
+        db.conn.execute("DELETE FROM meta WHERE key = 'days'")
+        if img.active_days is not None:
+            db.add_days(img.active_days, filled=True)
         # the word index is built by the store that next opens it
         db.conn.execute("DELETE FROM doc")
         db.conn.execute("DELETE FROM word")
@@ -599,6 +637,7 @@ def write_db(img: Image, db: SqliteBackend) -> None:
         db.rollback()
         raise
     db.needs_words = True
+    db.needs_days = img.active_days is None
 
 
 def differences(a: Image, b: Image, queries: int = 50) -> list[str]:
@@ -623,6 +662,8 @@ def differences(a: Image, b: Image, queries: int = 50) -> list[str]:
         out.append("deletions differ")
     if a.summaries != b.summaries:
         out.append("summaries differ")
+    if a.active_days != b.active_days:
+        out.append("active days differ")
     if not out:
         ia, ib = _index(a), _index(b)
         for i in [r["item_id"] for r in a.items][:queries]:

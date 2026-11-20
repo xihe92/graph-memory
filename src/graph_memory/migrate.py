@@ -255,7 +255,7 @@ class SqlitePlan:
             f"{c.get('items', 0)} items, {c.get('entities', 0)} entities, "
             f"{c.get('edges', 0)} edges, {c.get('segments', 0)} graduations, "
             f"{c.get('vectors', 0)} vectors, {c.get('deletions', 0)} deletions, "
-            f"{c.get('summaries', 0)} summaries",
+            f"{c.get('summaries', 0)} summaries, {c.get('active days', 0)} active days",
             f"  -> moved into {self.home / DB_FILE}, checked against the JSON files first",
             f"  -> the JSON files packed into {self.archive}, then removed",
         ]
